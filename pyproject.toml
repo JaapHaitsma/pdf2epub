@@ -5,7 +5,7 @@ description = "Convert a PDF to EPUB using Google Gemini via a simple CLI (uv pr
 authors = [
   { name = "Your Name" }
 ]
-requires-python = ">=3.9"
+requires-python = ">=3.13"
 readme = "README.md"
 license = { text = "MIT" }
 keywords = ["pdf", "epub", "gemini", "google", "cli"]

@@ -12,7 +12,7 @@ Convert a PDF to an EPUB using Google Gemini (2.5 Pro) with a simple CLI.
 
 ## Requirements
 
--   Python 3.9+
+-   Python 3.13+
 -   `uv` (https://docs.astral.sh/uv/)
 -   A Google Gemini API key (Model: `gemini-2.5-pro` or latest available).
 
@@ -37,9 +37,7 @@ uv run pdf2epub path/to/input.pdf -o output.epub
 
 This CLI uploads the PDF to Gemini and requests a full EPUB manifest, writes the files, and zips them.
 
-```sh
-uv run pdf2epub --gemini-epub path/to/input.pdf -o output.epub
-```
+````
 
 ## How it works
 
@@ -57,7 +55,7 @@ uv run pdf2epub --gemini-epub path/to/input.pdf -o output.epub
 
 ```sh
 uv run pytest -q
-```
+````
 
 ## License
 
