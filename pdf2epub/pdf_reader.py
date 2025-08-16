@@ -1,14 +1,11 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import List
+from typing import List, Dict, Any
 
 
 def extract_text_by_pages(pdf_path: Path) -> List[str]:
-    """Extract text from a PDF file, page by page.
-
-    Requires pdfminer.six. If not available, raises an informative error.
-    """
+    """Extract text from a PDF file, page by page using pdfminer.six."""
     try:
         from pdfminer.high_level import extract_text
         from pdfminer.pdfpage import PDFPage
@@ -41,6 +38,39 @@ def extract_text_by_pages(pdf_path: Path) -> List[str]:
     pages_text = [t.strip() for t in candidates if t.strip()]
 
     return pages_text
+
+
+def extract_images(pdf_path: Path) -> Dict[str, bytes]:
+    """Extract images from a PDF using PyMuPDF (fitz).
+
+    Returns a dict mapping image IDs (e.g., img_1.png) to raw image bytes (PNG).
+    """
+    try:
+        import fitz  # PyMuPDF
+    except Exception as e:  # noqa: BLE001
+        raise RuntimeError(
+            "PyMuPDF (pymupdf) is required for image extraction. Install it with 'uv add pymupdf'."
+        ) from e
+
+    if not pdf_path.exists():
+        raise FileNotFoundError(pdf_path)
+
+    images: Dict[str, bytes] = {}
+    doc = fitz.open(str(pdf_path))
+    img_counter = 0
+    for page_index in range(len(doc)):
+        page = doc[page_index]
+        for img in page.get_images(full=True):
+            xref = img[0]
+            pix = fitz.Pixmap(doc, xref)
+            if pix.n >= 5:  # CMYK or similar -> convert to RGB
+                pix = fitz.Pixmap(fitz.csRGB, pix)
+            img_counter += 1
+            img_name = f"img_{img_counter}.png"
+            images[img_name] = pix.tobytes("png")
+            pix = None
+    doc.close()
+    return images
 
 
 def chunk_text(pages: list[str], max_chars: int = 12000) -> list[str]:

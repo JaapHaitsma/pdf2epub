@@ -7,7 +7,7 @@ from rich.console import Console
 
 from .epub_builder import BookMeta, build_epub
 from .gemini_client import generate_structured_html, init_client
-from .pdf_reader import chunk_text, extract_text_by_pages
+from .pdf_reader import chunk_text, extract_text_by_pages, extract_images
 
 
 def convert_pdf_to_epub(
@@ -34,6 +34,15 @@ def convert_pdf_to_epub(
     chunks = chunk_text(pages)
     console.log(f"Created {len(chunks)} chunk(s) for model processing")
 
+    # Try to extract images; continue without images if extraction fails
+    images = {}
+    try:
+        images = extract_images(input_pdf)
+        if images:
+            console.log(f"Extracted {len(images)} image(s) from PDF")
+    except Exception as e:  # noqa: BLE001
+        console.log(f"[yellow]Image extraction skipped:[/] {e}")
+
     client = init_client(api_key=api_key, model=model)
 
     console.log("Calling Gemini to structure content…")
@@ -45,4 +54,4 @@ def convert_pdf_to_epub(
     )
 
     console.log(f"Building EPUB: {output_epub}")
-    build_epub(html_sections, output_epub, meta)
+    build_epub(html_sections, output_epub, meta, images=images or None)

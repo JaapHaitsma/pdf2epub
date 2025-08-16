@@ -5,6 +5,7 @@ Convert a PDF to an EPUB using Google Gemini (2.5 Pro) with a simple CLI.
 ## Features
 
 - Reads a PDF and sends text content to Google Gemini for structured chapterization and cleanup.
+- Extracts and embeds images into the EPUB (via PyMuPDF) and rewrites <img> src references.
 - Builds a valid EPUB using EbookLib.
 - Config via `.env` file (`GEMINI_API_KEY`).
 - Fast packaging and running with `uv`.
@@ -37,12 +38,13 @@ uv run pdf2epub path/to/input.pdf -o output.epub --title "Optional Title" --auth
 ## How it works
 
 - Extracts text using `pdfminer.six` (already included).
-- Sends chunks to Gemini asking for cleaned/structured content (chapters, headings, paragraphs, lists, code blocks if detected).
+- Extracts images using PyMuPDF (included) and packages them under `images/` in the EPUB.
+- Sends chunks to Gemini asking for cleaned/structured content; prompt encourages <img src="img_#.png"> tags where applicable, which are rewritten to packaged image paths.
 - Builds an EPUB from the model's structured output.
 
 ## Notes
 
-- If you need images in the EPUB, extend `epub_builder.py` to embed images and references.
+- Image extraction uses PyMuPDF; unusual color spaces are converted to RGB PNG.
 - The Gemini API may have token limits; this CLI chunks content and merges responses.
 
 ## Testing

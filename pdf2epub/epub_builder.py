@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable
+from typing import Iterable, Dict
 
 from ebooklib import epub
 
@@ -13,7 +13,12 @@ class BookMeta:
     author: str
 
 
-def build_epub(html_sections: Iterable[str], output_path: Path, meta: BookMeta) -> None:
+def build_epub(
+    html_sections: Iterable[str],
+    output_path: Path,
+    meta: BookMeta,
+    images: Dict[str, bytes] | None = None,
+) -> None:
     book = epub.EpubBook()
 
     book.set_identifier("pdf2epub")
@@ -23,10 +28,30 @@ def build_epub(html_sections: Iterable[str], output_path: Path, meta: BookMeta) 
     spine = ["nav"]
     toc = []
 
-    # Add each HTML section as a chapter
+    # Add images first so chapters can link to them
+    img_id_map: dict[str, str] = {}
+    if images:
+        for name, data in images.items():
+            item = epub.EpubItem(
+                uid=name,
+                file_name=f"images/{name}",
+                media_type="image/png",
+                content=data,
+            )
+            book.add_item(item)
+            img_id_map[name] = item.file_name
+
+    # Add each HTML section as a chapter and rewrite image refs to packaged paths
     for idx, html in enumerate(html_sections, start=1):
         chap = epub.EpubHtml(title=f"Chapter {idx}", file_name=f"chap_{idx}.xhtml", lang="en")
-        chap.content = html
+        if img_id_map:
+            tmp = html
+            for original, file_name in img_id_map.items():
+                tmp = tmp.replace(f'src="{original}"', f'src="{file_name}"')
+                tmp = tmp.replace(f"src='{original}'", f"src='{file_name}'")
+            chap.content = tmp
+        else:
+            chap.content = html
         book.add_item(chap)
         toc.append(chap)
         spine.append(chap)
