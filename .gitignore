@@ -1,0 +1,13 @@
+# Python
+__pycache__/
+*.pyc
+
+# venv/uv cache
+.venv/
+.uv/
+
+# dotenv
+.env
+
+# build artifacts
+*.epub
