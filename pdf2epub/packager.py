@@ -3,12 +3,32 @@ from __future__ import annotations
 import os
 import zipfile
 from pathlib import Path
-from typing import Dict, Any
+from typing import Dict, Any, List
 
 
 def write_manifest_to_dir(manifest: Dict[str, Any], out_dir: Path) -> None:
     files = manifest.get("files", [])
+    if not isinstance(files, list):
+        raise RuntimeError("Manifest 'files' must be a list")
+    # Ensure mimetype exists and is correct; if missing, add it
+    has_mimetype = any(isinstance(f, dict) and f.get("path") == "mimetype" for f in files)
+    if not has_mimetype:
+        files.insert(0, {"path": "mimetype", "content": "application/epub+zip", "encoding": "utf-8"})
+    # Ensure META-INF/container.xml exists; if missing, add minimal
+    has_container = any(isinstance(f, dict) and f.get("path") == "META-INF/container.xml" for f in files)
+    if not has_container:
+        container_xml = (
+            "<?xml version='1.0' encoding='utf-8'?>\n"
+            "<container version='1.0' xmlns='urn:oasis:names:tc:opendocument:xmlns:container'>\n"
+            "  <rootfiles>\n"
+            "    <rootfile full-path='OEBPS/content.opf' media-type='application/oebps-package+xml'/>\n"
+            "  </rootfiles>\n"
+            "</container>\n"
+        )
+        files.append({"path": "META-INF/container.xml", "content": container_xml, "encoding": "utf-8"})
     for f in files:
+        if not isinstance(f, dict) or "path" not in f:
+            raise RuntimeError("Each manifest file must be an object with a 'path'")
         path = Path(out_dir, f["path"]).resolve()
         path.parent.mkdir(parents=True, exist_ok=True)
         content = f.get("content", "")

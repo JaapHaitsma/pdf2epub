@@ -5,7 +5,7 @@ from typing import Optional
 
 from rich.console import Console
 
-from .gemini_client import init_client, upload_pdf_and_request_epub_manifest
+from .gemini_client import init_client, upload_pdf_and_request_epub_manifest_verbose
 from .packager import write_manifest_to_dir, zip_epub_from_dir
 
 
@@ -26,7 +26,17 @@ def convert_pdf_to_epub(
     client = init_client(api_key=api_key, model=model)
 
     console.log("Delegating EPUB generation to Gemini (manifest mode)…")
-    manifest = upload_pdf_and_request_epub_manifest(client, str(input_pdf))
+    try:
+        debug_json = (output_epub.parent / (output_epub.stem + "_manifest_raw.json"))
+        manifest = upload_pdf_and_request_epub_manifest_verbose(
+            client,
+            str(input_pdf),
+            console=console,
+            debug_path=str(debug_json),
+        )
+    except Exception as e:
+        console.print(f"[red]Failed to parse manifest from Gemini:[/] {e}")
+        raise
     temp_dir = output_epub.parent / (output_epub.stem + "_epub_src")
     if temp_dir.exists():
         # Best-effort clean

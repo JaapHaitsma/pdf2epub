@@ -18,7 +18,7 @@ def test_pipeline_builds_epub_with_mocks(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(pipeline, "init_client", lambda api_key, model: DummyModel())
     monkeypatch.setattr(
         pipeline,
-        "upload_pdf_and_request_epub_manifest",
+        "upload_pdf_and_request_epub_manifest_verbose",
         lambda _model, _path: {
             "files": [
                 {"path": "mimetype", "content": "application/epub+zip"},

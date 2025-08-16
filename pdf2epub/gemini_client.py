@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Iterable, List, Dict, Any
+from typing import Iterable, List, Dict, Any, Optional
 
 import google.generativeai as genai
 
@@ -80,8 +80,79 @@ def upload_pdf_and_request_epub_manifest(model: genai.GenerativeModel, pdf_path:
         "Use relative references and include a stylesheet (e.g., 'OEBPS/styles.css'). "
         "If the book contains figures, reference them via <img src=\"images/img_#.png\"> and include an 'images' array listing those paths."
     )
-    resp = model.generate_content([instruction, file])
+    resp = model.generate_content(
+        [instruction, file],
+        generation_config={"response_mime_type": "application/json"},
+    )
     text = (resp.text or "").strip()
+    data = _parse_json_safely(text)
+    if not isinstance(data, dict) or "files" not in data:
+        raise RuntimeError("Gemini did not return a valid EPUB manifest JSON.")
+    return data
+
+
+def upload_pdf_and_request_epub_manifest_verbose(
+    model: genai.GenerativeModel,
+    pdf_path: str,
+    *,
+    console=None,
+    debug_path: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Same as upload_pdf_and_request_epub_manifest, but streams Gemini output to the console.
+
+    This provides live feedback in the terminal so you can see progress as the model generates the JSON.
+    """
+    if console:
+        try:
+            console.log("Uploading PDF to Gemini…")
+        except Exception:
+            pass
+    file = genai.upload_file(pdf_path, mime_type="application/pdf")
+    instruction = (
+        "Analyze this PDF and produce a complete EPUB file set as a JSON manifest. "
+        "Return only JSON (no markdown). The manifest must be an object with key 'files' as an array of objects. "
+        "Each file object must have: 'path' (string path under EPUB root), 'content' (string), and optionally 'encoding' ('utf-8'). "
+        "Include standard EPUB structure: 'mimetype' at root with value 'application/epub+zip', 'META-INF/container.xml', "
+        "OPF package (e.g., 'OEBPS/content.opf'), navigation (nav.xhtml) and chapters as XHTML under OEBPS/. "
+        "Use relative references and include a stylesheet (e.g., 'OEBPS/styles.css'). "
+        "If the book contains figures, reference them via <img src=\"images/img_#.png\"> and include an 'images' array listing those paths."
+    )
+    if console:
+        try:
+            console.log("Requesting EPUB manifest from Gemini (streaming)…")
+        except Exception:
+            pass
+    stream = model.generate_content(
+        [instruction, file],
+        stream=True,
+        generation_config={"response_mime_type": "application/json"},
+    )
+    collected = []
+    for chunk in stream:
+        text = chunk.text or ""
+        if text:
+            collected.append(text)
+            if console:
+                try:
+                    # Write without forcing a newline for a more natural stream
+                    console.out.write(text)
+                    console.out.flush()
+                except Exception:
+                    console.print(text)
+    # Add a newline after streaming
+    if console:
+        try:
+            console.out.write("\n")
+            console.out.flush()
+        except Exception:
+            console.print("")
+    text = ("".join(collected)).strip()
+    if debug_path:
+        try:
+            from pathlib import Path
+            Path(debug_path).write_text(text, encoding="utf-8")
+        except Exception:
+            pass
     data = _parse_json_safely(text)
     if not isinstance(data, dict) or "files" not in data:
         raise RuntimeError("Gemini did not return a valid EPUB manifest JSON.")
@@ -90,21 +161,31 @@ def upload_pdf_and_request_epub_manifest(model: genai.GenerativeModel, pdf_path:
 
 def _parse_json_safely(text: str) -> Any:
     import json
-    # Strip markdown fences if present
-    if text.startswith("```"):
-        # Find the first fence end
-        end = text.rfind("```")
-        if end != -1:
-            inner = text.split("\n", 1)[1]
-            text = inner[: end - text.find("\n") - 1]
+    # Strip markdown fences if present (``` or ```json)
+    if text.lstrip().startswith("```"):
+        s = text.lstrip()
+        first_nl = s.find("\n")
+        if first_nl != -1:
+            closing = s.rfind("```")
+            if closing != -1 and closing > first_nl:
+                text = s[first_nl + 1 : closing]
     # Try direct parse
     try:
         return json.loads(text)
     except Exception:
-        # Fallback: find the first { ... } block
+        # Fallback: extract the largest plausible JSON object by brace matching
         start = text.find("{")
-        end = text.rfind("}")
-        if start != -1 and end != -1 and end > start:
-            snippet = text[start : end + 1]
-            return json.loads(snippet)
+        if start != -1:
+            depth = 0
+            end_index = -1
+            for i, ch in enumerate(text[start:], start=start):
+                if ch == "{" or ch == "[":
+                    depth += 1
+                elif ch == "}" or ch == "]":
+                    depth -= 1
+                    if depth == 0:
+                        end_index = i
+            if end_index != -1:
+                snippet = text[start : end_index + 1]
+                return json.loads(snippet)
         raise
