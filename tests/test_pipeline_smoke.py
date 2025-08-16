@@ -11,24 +11,22 @@ def test_pipeline_builds_epub_with_mocks(tmp_path: Path, monkeypatch):
     in_pdf.write_bytes(b"%PDF-1.4\n% minimal placeholder\n")
     out_epub = tmp_path / "output.epub"
 
-    # Mock PDF extraction to avoid real parsing
-    monkeypatch.setattr(pipeline, "extract_text_by_pages", lambda p: [
-        "Sample page 1 text.",
-        "Sample page 2 text.",
-    ])
-
-    # Mock Gemini client init and content generation
+    # Mock Gemini client init and manifest generation (new path)
     class DummyModel:
         pass
 
     monkeypatch.setattr(pipeline, "init_client", lambda api_key, model: DummyModel())
     monkeypatch.setattr(
         pipeline,
-        "generate_structured_html",
-        lambda _model, chunks: [
-            "<h1>Title</h1><p>From chunk 1</p>",
-            "<h2>Section</h2><p>From chunk 2</p>",
-        ],
+        "upload_pdf_and_request_epub_manifest",
+        lambda _model, _path: {
+            "files": [
+                {"path": "mimetype", "content": "application/epub+zip"},
+                {"path": "META-INF/container.xml", "content": "<container/>"},
+                {"path": "OEBPS/content.opf", "content": "<package/>"},
+                {"path": "OEBPS/ch1.xhtml", "content": "<h1>Ch1</h1>"},
+            ]
+        },
     )
 
     # Run conversion
@@ -37,8 +35,6 @@ def test_pipeline_builds_epub_with_mocks(tmp_path: Path, monkeypatch):
         output_epub=out_epub,
         api_key="dummy",
         model="gemini-2.5-pro",
-        title="Mocked Title",
-        author="Mocked Author",
         console=None,
     )
 

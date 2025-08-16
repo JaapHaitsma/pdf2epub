@@ -19,9 +19,7 @@ console = Console()
 class Args:
     input_pdf: Path
     output_epub: Path
-    title: str | None
-    author: str | None
-    model: str | None
+    keep_sources: bool
 
 
 def parse_args(argv: list[str]) -> Args:
@@ -29,7 +27,7 @@ def parse_args(argv: list[str]) -> Args:
 
     parser = argparse.ArgumentParser(
         prog="pdf2epub",
-        description="Convert a PDF to EPUB using Google Gemini",
+        description="Upload a PDF to Google Gemini to generate a complete EPUB",
     )
     parser.add_argument("input_pdf", type=Path, help="Path to input PDF file")
     parser.add_argument(
@@ -37,14 +35,12 @@ def parse_args(argv: list[str]) -> Args:
         "--output",
         dest="output_epub",
         type=Path,
-        help="Path to output .epub (default: input name with .epub)",
+    help="Path to output .epub (default: input name with .epub)",
     )
-    parser.add_argument("--title", type=str, help="EPUB title override")
-    parser.add_argument("--author", type=str, help="EPUB author override")
     parser.add_argument(
-        "--model",
-        type=str,
-        help="Gemini model id (default: env GEMINI_MODEL or gemini-2.5-pro)",
+        "--keep-sources",
+        action="store_true",
+        help="Keep the unpacked EPUB files on disk",
     )
 
     ns = parser.parse_args(argv)
@@ -54,13 +50,7 @@ def parse_args(argv: list[str]) -> Args:
     else:
         output_epub = ns.output_epub
 
-    return Args(
-        input_pdf=input_pdf,
-        output_epub=output_epub,
-        title=ns.title,
-        author=ns.author,
-        model=ns.model,
-    )
+    return Args(input_pdf=input_pdf, output_epub=output_epub, keep_sources=ns.keep_sources)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -76,7 +66,7 @@ def main(argv: list[str] | None = None) -> int:
         console.print("[red]Error:[/] GEMINI_API_KEY not set. Add it to .env or your environment.")
         return 2
 
-    model = args.model or os.getenv("GEMINI_MODEL") or "gemini-2.5-pro"
+    model = os.getenv("GEMINI_MODEL") or "gemini-2.5-pro"
 
     try:
         convert_pdf_to_epub(
@@ -84,8 +74,7 @@ def main(argv: list[str] | None = None) -> int:
             output_epub=args.output_epub,
             api_key=api_key,
             model=model,
-            title=args.title,
-            author=args.author,
+            keep_sources=args.keep_sources,
             console=console,
         )
     except FileNotFoundError as e:

@@ -5,9 +5,8 @@ from typing import Optional
 
 from rich.console import Console
 
-from .epub_builder import BookMeta, build_epub
-from .gemini_client import generate_structured_html, init_client
-from .pdf_reader import chunk_text, extract_text_by_pages, extract_images
+from .gemini_client import init_client, upload_pdf_and_request_epub_manifest
+from .packager import write_manifest_to_dir, zip_epub_from_dir
 
 
 def convert_pdf_to_epub(
@@ -15,8 +14,7 @@ def convert_pdf_to_epub(
     output_epub: Path,
     api_key: str,
     model: str,
-    title: Optional[str] = None,
-    author: Optional[str] = None,
+    keep_sources: bool = False,
     console: Optional[Console] = None,
 ) -> None:
     console = console or Console()
@@ -25,33 +23,23 @@ def convert_pdf_to_epub(
         raise FileNotFoundError(input_pdf)
 
     console.log(f"Reading PDF: {input_pdf}")
-    pages = extract_text_by_pages(input_pdf)
-    if not pages:
-        raise RuntimeError("No text extracted from PDF.")
-
-    console.log(f"Extracted ~{sum(len(p) for p in pages):,} chars across {len(pages)} page chunks")
-
-    chunks = chunk_text(pages)
-    console.log(f"Created {len(chunks)} chunk(s) for model processing")
-
-    # Try to extract images; continue without images if extraction fails
-    images = {}
-    try:
-        images = extract_images(input_pdf)
-        if images:
-            console.log(f"Extracted {len(images)} image(s) from PDF")
-    except Exception as e:  # noqa: BLE001
-        console.log(f"[yellow]Image extraction skipped:[/] {e}")
-
     client = init_client(api_key=api_key, model=model)
 
-    console.log("Calling Gemini to structure content…")
-    html_sections = generate_structured_html(client, chunks)
-
-    meta = BookMeta(
-        title=title or input_pdf.stem,
-        author=author or "Unknown",
-    )
-
-    console.log(f"Building EPUB: {output_epub}")
-    build_epub(html_sections, output_epub, meta, images=images or None)
+    console.log("Delegating EPUB generation to Gemini (manifest mode)…")
+    manifest = upload_pdf_and_request_epub_manifest(client, str(input_pdf))
+    temp_dir = output_epub.parent / (output_epub.stem + "_epub_src")
+    if temp_dir.exists():
+        # Best-effort clean
+        import shutil
+        shutil.rmtree(temp_dir)
+    temp_dir.mkdir(parents=True, exist_ok=True)
+    write_manifest_to_dir(manifest, temp_dir)
+    console.log("Zipping EPUB…")
+    zip_epub_from_dir(temp_dir, output_epub)
+    if not keep_sources:
+        try:
+            import shutil
+            shutil.rmtree(temp_dir)
+        except Exception:
+            pass
+    return
