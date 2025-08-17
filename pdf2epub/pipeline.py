@@ -410,10 +410,11 @@ def _build_content_opf(
 def _build_cover_xhtml(img_href: str) -> str:
     return (
         "<?xml version='1.0' encoding='utf-8'?>\n"
-    "<html xmlns='http://www.idpf.org/2007/ops' xmlns:xhtml='http://www.w3.org/1999/xhtml' xml:lang='en'>\n"
+    "<html xmlns='http://www.w3.org/1999/xhtml' xmlns:epub='http://www.idpf.org/2007/ops' xml:lang='en' lang='en'>\n"
         "  <head>\n"
         "    <title>Cover</title>\n"
         "    <meta charset='utf-8'/>\n"
+    "    <meta name='viewport' content='width=device-width, initial-scale=1'/>\n"
         "    <link rel='stylesheet' type='text/css' href='styles.css'/>\n"
         "    <style>body,html{margin:0;padding:0}.cover{display:flex;align-items:center;justify-content:center;min-height:98vh}img{max-width:100%;height:auto;display:block}</style>\n"
         "  </head>\n"
