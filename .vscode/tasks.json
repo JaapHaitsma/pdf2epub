@@ -1,0 +1,13 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "uv sync to upgrade PyMuPDF",
+			"type": "shell",
+			"command": "uv sync",
+			"args": [],
+			"problemMatcher": [],
+			"group": "build"
+		}
+	]
+}

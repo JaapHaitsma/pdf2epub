@@ -26,6 +26,8 @@ Convert a PDF (even if it is scanned) to an EPUB using Google Gemini (2.5 Pro) w
     GEMINI_API_KEY=your_api_key_here
     # optional
     GEMINI_MODEL=gemini-2.5-pro
+    # optional: cap JSON responses to avoid truncation; sane default is 2048
+    PDF2EPUB_MAX_OUTPUT_TOKENS=2048
     ```
 2. Install and check the CLI:
     ```sh
@@ -60,7 +62,7 @@ uv run pdf2epub book.pdf -o book.epub --keep-sources --debug
 
 ## How it works
 
--   Gemini is prompted to enumerate sections and return per-section XHTML + image boxes. Strict JSON parsing with streaming fallback and retries.
+-   Gemini is prompted to enumerate sections and return per-section XHTML + image boxes. Strict JSON parsing with streaming fallback and retries. For long sections, the tool detects truncation (finish_reason=MAX_TOKENS) and automatically asks Gemini to “continue from the last sentence” up to three times, returning JSON-only chunks that are merged.
 -   Images: For each section, Gemini may return normalized `box_2d` + `page_index`. PyMuPDF crops those regions from the PDF and writes `OEBPS/images/*` files; decorative rectangles/lines are filtered out.
 -   Packaging: We assemble `OEBPS/*.xhtml`, `content.opf`, `toc.ncx`, `nav.xhtml`, `styles.css`, and zip into EPUB with correct mimetype placement. EPUB 2.0-compatible NCX is included for broader reader support.
 -   Cover: If provided, the cover image and `cover.xhtml` are added and placed first in the spine, with EPUB2 cover metadata and a guide entry. If not provided, the first PDF page is rendered as a JPEG cover by default (unless `--no-auto-cover`).

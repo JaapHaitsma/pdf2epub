@@ -7,7 +7,7 @@ Architecture
 
 -   `pdf2epub/cli.py`: argument parsing, .env, wires to pipeline.
 -   `pdf2epub/pipeline.py`: orchestrates conversion (by-section only), EPUB assembly, packaging.
--   `pdf2epub/gemini_client.py`: Gemini calls with robust JSON-only prompts, streaming fallback, and retries.
+-   `pdf2epub/gemini_client.py`: Gemini calls with robust JSON-only prompts, streaming fallback, retries, and continuation when responses hit MAX_TOKENS. `PDF2EPUB_MAX_OUTPUT_TOKENS` env can tune token cap; defaults to 2048.
 -   `pdf2epub/packager.py`: writes files to a temp dir and zips EPUB (mimetype stored first).
 -   `pdf2epub/epub_builder.py`: small helper for tests using EbookLib.
 
@@ -25,6 +25,7 @@ Prompts
 -   System prompt: preserve headings, lists, code; keep numbering prefixes/labels.
 -   Sections listing: return logical sections with titles preserving numbering.
 -   Section content: return JSON `{xhtml, images[]}`, keep numbering unchanged, include only meaningful figures (no decorative elements), normalized `box_2d`.
+	-   If a section exceeds token limits, we detect `finish_reason=MAX_TOKENS` and send follow-up “continue from the last sentence, JSON only, same shape” prompts, merging the returned JSON.
 
 Running
 

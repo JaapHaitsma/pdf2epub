@@ -1,7 +1,12 @@
 from __future__ import annotations
 
-from typing import Any, Dict, Iterable, List, Optional
+import hashlib
+import json
+import os
+import sys
 import time
+from pathlib import Path as _Path
+from typing import Any, Dict, Iterable, List, Optional
 
 import google.generativeai as genai
 
@@ -13,6 +18,109 @@ SYSTEM_PROMPT = (
     "(e.g., 'Chapter 3', '1.2.4', '§ 2.3'). When a prompt explicitly requests images, include them as instructed; "
     "otherwise do not add images."
 )
+
+# Conservative default to avoid oversized responses; callers can override if needed
+def _max_output_tokens() -> int:
+    try:
+        v = int(os.environ.get("PDF2EPUB_MAX_OUTPUT_TOKENS", "2048"))
+        if v <= 0:
+            return 2048
+        return v
+    except Exception:
+        return 2048
+
+
+def _json_cfg() -> Dict[str, Any]:
+    return {"response_mime_type": "application/json", "max_output_tokens": _max_output_tokens()}
+
+
+# ---- Upload caching (avoid re-uploading the same PDF) ----
+def _cache_dir() -> _Path:
+    env = os.environ.get("PDF2EPUB_CACHE_DIR")
+    if env:
+        base = _Path(env)
+    elif sys.platform == "darwin":  # type: ignore[attr-defined]
+        base = _Path.home() / "Library" / "Caches" / "pdf2epub"
+    elif os.environ.get("XDG_CACHE_HOME"):
+        base = _Path(os.environ["XDG_CACHE_HOME"]) / "pdf2epub"
+    else:
+        base = _Path.home() / ".cache" / "pdf2epub"
+    base.mkdir(parents=True, exist_ok=True)
+    return base
+
+
+def _cache_file() -> _Path:
+    return _cache_dir() / "files.json"
+
+
+def _load_cache() -> Dict[str, Any]:
+    p = _cache_file()
+    if not p.exists():
+        return {}
+    try:
+        return json.loads(p.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def _save_cache(d: Dict[str, Any]) -> None:
+    _cache_file().write_text(json.dumps(d, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _sha256(path: str) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _wait_active(name: str, timeout_s: int = 120) -> None:
+    start = time.time()
+    while True:
+        try:
+            f = genai.get_file(name)
+            state = getattr(f, "state", None)
+            if state == "ACTIVE" or getattr(state, "name", None) == "ACTIVE":
+                return
+        except Exception:
+            pass
+        if time.time() - start > timeout_s:
+            raise TimeoutError("Timeout waiting for file to become ACTIVE")
+        time.sleep(1.5)
+
+
+def ensure_uploaded_file(pdf_path: str, *, console=None, use_cache: bool = True):
+    """Return a Gemini File object, reusing an existing upload by PDF hash when possible."""
+    sha = _sha256(pdf_path)
+    cache = _load_cache() if use_cache else {}
+    entry = cache.get(sha) if isinstance(cache, dict) else None
+    if entry and isinstance(entry, dict):
+        name = entry.get("name")
+        if isinstance(name, str) and name:
+            try:
+                f = genai.get_file(name)
+                state = getattr(f, "state", None)
+                if state != "FAILED":
+                    if console:
+                        try:
+                            console.log(f"Reusing uploaded PDF: {name}")
+                        except Exception:
+                            pass
+                    return f
+            except Exception:
+                pass
+    if console:
+        try:
+            console.log("Uploading PDF once and caching handle…")
+        except Exception:
+            pass
+    f = genai.upload_file(pdf_path, mime_type="application/pdf")
+    _wait_active(getattr(f, "name", ""))
+    if use_cache:
+        cache[sha] = {"name": getattr(f, "name", ""), "uploaded_at": int(time.time())}
+        _save_cache(cache)
+    return f
 
 
 def init_client(api_key: str, model: str) -> genai.GenerativeModel:
@@ -38,6 +146,7 @@ def get_sections_from_pdf_verbose(
     model: genai.GenerativeModel,
     pdf_path: str,
     *,
+    uploaded_file=None,
     console=None,
     debug_path: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
@@ -47,120 +156,72 @@ def get_sections_from_pdf_verbose(
             console.log("Requesting sections (front matter, chapters, back matter) from Gemini…")
         except Exception:
             pass
-    file = genai.upload_file(pdf_path, mime_type="application/pdf")
+    file = uploaded_file or genai.upload_file(pdf_path, mime_type="application/pdf")
     instruction = (
         "Analyze this PDF and return JSON with all logical sections in reading order. "
         "Return only JSON with shape: {\"sections\": [{\"index\": integer starting at 1, \"type\": one of "
-        "'title','copyright','dedication','preface','foreword','prologue','introduction','toc','chapter','appendix','acknowledgments','epilogue','afterword','notes','glossary','bibliography','index', \"title\": string}]}. "
+        "'title','copyright','dedication','preface','foreword','prologue','introduction','toc','chapter','appendix','acknowledgments','epilogue','afterword','notes','glossary','bibliography','index', "
+        "\"title\": string, \"page_start\": integer (1-based), \"page_end\": integer (1-based, inclusive) }]}. "
         "Important: the \"title\" must preserve any numbering and labels exactly as in the document (e.g., 'Chapter 3', '1.1 Overview', '§ 2.3'). "
-        "Do not invent, drop, or renumber headings. Focus on logical structure, not pages. Do not include full content here."
+        "Provide page ranges as a best-effort estimate for where each logical section occurs. Do not include full content here."
     )
-    text = ""
-    # Try streaming first; if it throws (e.g., 504), fall back to non-streaming with retries
+    chat = model.start_chat()
+    resp = chat.send_message([instruction, file], generation_config=_json_cfg())
+    text = _extract_text_from_response(resp).strip()
+    finish = _get_finish_reason(resp)
+    sections: List[Dict[str, Any]] = []
     try:
-        stream = model.generate_content(
-            [instruction, file],
-            stream=True,
-            generation_config={"response_mime_type": "application/json"},
+        data = _parse_json_safely(text)
+        if isinstance(data, dict) and isinstance(data.get("sections"), list):
+            sections.extend([x for x in data["sections"] if isinstance(x, dict)])
+    except Exception:
+        pass
+    tries = 0
+    while finish == "MAX_TOKENS" and tries < 3:
+        tries += 1
+        cont = (
+            "Continue from the last sentence. Return only JSON with the same shape, containing only the remaining "
+            "sections (no repetition)."
         )
-        collected: List[str] = []
+        resp = chat.send_message(cont, generation_config=_json_cfg())
+        text = _extract_text_from_response(resp).strip()
+        finish = _get_finish_reason(resp)
         try:
-            for chunk in stream:
-                try:
-                    t = getattr(chunk, "text", None) or ""
-                except Exception:
-                    t = ""
-                if t:
-                    collected.append(t)
-                    if console:
-                        try:
-                            console.out.write(t)
-                            console.out.flush()
-                        except Exception:
-                            try:
-                                console.print(t)
-                            except Exception:
-                                pass
-        except Exception as e:  # streaming failed mid-way
-            if console:
-                try:
-                    console.log(f"Streaming failed, will retry without streaming: {e}")
-                except Exception:
-                    pass
-            collected = []
-        # best-effort newline after streaming
-        if console:
-            try:
-                console.out.write("\n")
-                console.out.flush()
-            except Exception:
-                try:
-                    console.print("")
-                except Exception:
-                    pass
-        text = ("".join(collected)).strip()
-    except Exception as e:
-        if console:
-            try:
-                console.log(f"Stream request failed to start, will retry without streaming: {e}")
-            except Exception:
-                pass
-    if not text:
-        if console:
-            try:
-                console.log("Retrying sections request without streaming (with backoff)…")
-            except Exception:
-                pass
-        last_err: Optional[Exception] = None
-        for attempt in range(3):
-            try:
-                resp = model.generate_content(
-                    [instruction, file],
-                    generation_config={"response_mime_type": "application/json"},
-                )
-                text = _extract_text_from_response(resp).strip()
-                if text:
-                    break
-            except Exception as e:
-                last_err = e
-            # backoff before next try
-            time.sleep(2 ** attempt)
-        if not text and last_err:
-            raise last_err
+            data = _parse_json_safely(text)
+            if isinstance(data, dict) and isinstance(data.get("sections"), list):
+                sections.extend([x for x in data["sections"] if isinstance(x, dict)])
+        except Exception:
+            continue
     if debug_path:
         try:
             from pathlib import Path
-            Path(debug_path).write_text(text, encoding="utf-8")
+            Path(debug_path).write_text(json.dumps({"sections": sections}, ensure_ascii=False), encoding="utf-8")
         except Exception:
             pass
-    data = _parse_json_safely(text)
-    if not isinstance(data, dict) or not isinstance(data.get("sections"), list):
+    if not sections:
         raise RuntimeError("Gemini did not return a valid sections JSON with 'sections'.")
-    return data["sections"]
+    return sections
 
 
 def get_section_content_verbose(
     model: genai.GenerativeModel,
     pdf_path: str,
     *,
+    uploaded_file=None,
     section_index: int,
     section_type: str,
     section_title: str,
+    page_range: Optional[tuple[int, int]] = None,
     console=None,
     debug_path: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Request a single section's content as XHTML JSON."""
+    """Request a single section's content as XHTML JSON with continuation on MAX_TOKENS."""
     if console:
         try:
             console.log(f"Requesting section {section_index} [{section_type}]: {section_title}")
         except Exception:
             pass
-    file = genai.upload_file(pdf_path, mime_type="application/pdf")
-    if console:
-        try:
-            console.log(f"Uploaded PDF file: {pdf_path}")
-        except Exception:
-            pass
+    file = uploaded_file or genai.upload_file(pdf_path, mime_type="application/pdf")
     safe_title = section_title.replace("{", "{{").replace("}", "}}")
     safe_type = (section_type or "section").strip()
     instruction = (
@@ -173,139 +234,73 @@ def get_section_content_verbose(
         "box_2d coordinates MUST be normalized floats in [0,1] relative to the page (top-left origin).\n"
         f"Return only JSON. Section to extract: index={section_index}, type=\"{safe_type}\", title=\"{safe_title}\"."
     )
-    text = ""
-    try:
-        stream = model.generate_content(
-            [instruction, file],
-            stream=True,
-            generation_config={"response_mime_type": "application/json"},
-        )
-        if console:
-            try:
-                console.log("Streaming section content from Gemini…")
-            except Exception:
-                pass
-        collected: List[str] = []
+    if page_range and isinstance(page_range, tuple) and len(page_range) == 2:
+        p0, p1 = page_range
         try:
-            for chunk in stream:
-                try:
-                    t = getattr(chunk, "text", None) or ""
-                except Exception:
-                    t = ""
-                if t:
-                    collected.append(t)
-                    if console:
-                        try:
-                            console.out.write(t)
-                            console.out.flush()
-                        except Exception:
-                            try:
-                                console.print(t)
-                            except Exception:
-                                pass
-        except Exception as e:
-            if console:
-                try:
-                    console.log(f"Streaming failed, will retry without streaming: {e}")
-                except Exception:
-                    pass
-            collected = []
-        if console:
-            try:
-                console.out.write("\n")
-                console.out.flush()
-            except Exception:
-                try:
-                    console.print("")
-                except Exception:
-                    pass
-        text = ("".join(collected)).strip()
-    except Exception as e:
-        if console:
-            try:
-                console.log(f"Stream request failed to start, will retry without streaming: {e}")
-            except Exception:
-                pass
-    if not text:
-        if console:
-            try:
-                console.log("Retrying section request without streaming (with backoff)…")
-            except Exception:
-                pass
-        last_err: Optional[Exception] = None
-        for attempt in range(3):
-            try:
-                resp = model.generate_content(
-                    [instruction, file],
-                    generation_config={"response_mime_type": "application/json"},
+            p0i = int(p0)
+            p1i = int(p1)
+            instruction += f" Restrict extraction strictly to pages {p0i}..{p1i} (inclusive)."
+        except Exception:
+            pass
+    # Chat-based loop with continuation
+    chat = model.start_chat()
+    resp = chat.send_message([instruction, file], generation_config=_json_cfg())
+    text = _extract_text_from_response(resp).strip()
+    finish = _get_finish_reason(resp)
+    xhtml_accum: List[str] = []
+    images_accum: List[Dict[str, Any]] = []
+    try:
+        data = _parse_json_safely(text)
+        if isinstance(data, dict):
+            xhtml_accum.append(
+                data.get("xhtml")
+                or data.get("html")
+                or data.get("content")
+                or data.get("section_html")
+                or ""
+            )
+            images_accum.extend(_normalize_images(data.get("images")))
+    except Exception:
+        pass
+    # Continue if truncated
+    tries = 0
+    while finish == "MAX_TOKENS" and tries < 3:
+        tries += 1
+        cont = (
+            "Continue from the last sentence. Return only JSON with the same shape, containing only the remaining "
+            "content for this section (no repetition)."
+        )
+        resp = chat.send_message(cont, generation_config=_json_cfg())
+        text = _extract_text_from_response(resp).strip()
+        finish = _get_finish_reason(resp)
+        try:
+            data = _parse_json_safely(text)
+            if isinstance(data, dict):
+                xhtml_accum.append(
+                    data.get("xhtml")
+                    or data.get("html")
+                    or data.get("content")
+                    or data.get("section_html")
+                    or ""
                 )
-                text = _extract_text_from_response(resp).strip()
-                if text:
-                    break
-            except Exception as e:
-                last_err = e
-            time.sleep(2 ** attempt)
-        if not text and last_err:
-            raise last_err
+                images_accum.extend(_normalize_images(data.get("images")))
+        except Exception:
+            continue
+    xhtml = "\n".join([s for s in xhtml_accum if isinstance(s, str)])
     if debug_path:
         try:
             from pathlib import Path
-            Path(debug_path).write_text(text, encoding="utf-8")
+            Path(debug_path).write_text(json.dumps({"xhtml": xhtml, "images": images_accum}, ensure_ascii=False), encoding="utf-8")
         except Exception:
             pass
-    data = _parse_json_safely(text)
-    if not isinstance(data, dict):
-        raise RuntimeError("Gemini did not return a valid section JSON object.")
-    xhtml = (
-        data.get("xhtml")
-        or data.get("html")
-        or data.get("content")
-        or data.get("section_html")
-        or ""
-    )
-    images = data.get("images")
-    if not isinstance(images, list):
-        images = []
-    # Normalize image items
-    norm_images: List[Dict[str, Any]] = []
-    for it in images:
-        if not isinstance(it, dict):
-            continue
-        filename = it.get("filename") or it.get("file") or it.get("name")
-        label = it.get("label") or it.get("alt") or ""
-        box = it.get("box_2d") or it.get("bbox") or it.get("box")
-        page_index = it.get("page_index") or it.get("page") or it.get("pageNumber")
-        if not filename or not isinstance(filename, str):
-            continue
-        if not isinstance(box, (list, tuple)) or len(box) != 4:
-            continue
-        try:
-            x0, y0, x1, y1 = [float(v) for v in box]
-        except Exception:
-            continue
-        # clamp to [0,1]
-        def _clamp(v: float) -> float:
-            return 0.0 if v < 0 else (1.0 if v > 1 else v)
-        x0, y0, x1, y1 = _clamp(x0), _clamp(y0), _clamp(x1), _clamp(y1)
-        if page_index is None:
-            continue
-        try:
-            page_index = int(page_index)
-        except Exception:
-            continue
-        norm_images.append({
-            "filename": filename,
-            "label": label,
-            "box_2d": [x0, y0, x1, y1],
-            "page_index": page_index,
-        })
-    return {"xhtml": xhtml, "images": norm_images}
+    return {"xhtml": xhtml, "images": images_accum}
 
 
 def get_book_metadata_verbose(
     model: genai.GenerativeModel,
     pdf_path: str,
     *,
+    uploaded_file=None,
     console=None,
     debug_path: Optional[str] = None,
 ) -> Dict[str, Any]:
@@ -315,7 +310,7 @@ def get_book_metadata_verbose(
             console.log("Requesting book metadata from Gemini…")
         except Exception:
             pass
-    file = genai.upload_file(pdf_path, mime_type="application/pdf")
+    file = uploaded_file or genai.upload_file(pdf_path, mime_type="application/pdf")
     instruction = (
         "Extract bibliographic metadata for this book and return JSON only. "
         "Fields: title (string); authors (array of strings); isbn (string, digits/dashes, null if none); "
@@ -327,7 +322,7 @@ def get_book_metadata_verbose(
         stream = model.generate_content(
             [instruction, file],
             stream=True,
-            generation_config={"response_mime_type": "application/json"},
+            generation_config=_json_cfg(),
         )
         collected: List[str] = []
         try:
@@ -381,7 +376,7 @@ def get_book_metadata_verbose(
             try:
                 resp = model.generate_content(
                     [instruction, file],
-                    generation_config={"response_mime_type": "application/json"},
+                    generation_config=_json_cfg(),
                 )
                 text = _extract_text_from_response(resp).strip()
                 if text:
@@ -489,3 +484,56 @@ def _extract_text_from_response(resp) -> str:
     except Exception:
         return ""
     return "".join(texts)
+
+
+def _get_finish_reason(resp) -> Optional[str]:
+    try:
+        cands = getattr(resp, "candidates", None) or []
+        if not cands:
+            return None
+        fr = getattr(cands[0], "finish_reason", None)
+        if isinstance(fr, str):
+            return fr
+        name = getattr(fr, "name", None)
+        if isinstance(name, str):
+            return name
+    except Exception:
+        return None
+    return None
+
+
+def _normalize_images(images: Any) -> List[Dict[str, Any]]:
+    if not isinstance(images, list):
+        return []
+    out: List[Dict[str, Any]] = []
+    for it in images:
+        if not isinstance(it, dict):
+            continue
+        filename = it.get("filename") or it.get("file") or it.get("name")
+        label = it.get("label") or it.get("alt") or ""
+        box = it.get("box_2d") or it.get("bbox") or it.get("box")
+        page_index = it.get("page_index") or it.get("page") or it.get("pageNumber")
+        if not filename or not isinstance(filename, str):
+            continue
+        if not isinstance(box, (list, tuple)) or len(box) != 4:
+            continue
+        try:
+            x0, y0, x1, y1 = [float(v) for v in box]
+        except Exception:
+            continue
+        def _clamp(v: float) -> float:
+            return 0.0 if v < 0 else (1.0 if v > 1 else v)
+        x0, y0, x1, y1 = _clamp(x0), _clamp(y0), _clamp(x1), _clamp(y1)
+        if page_index is None:
+            continue
+        try:
+            page_index = int(page_index)
+        except Exception:
+            continue
+        out.append({
+            "filename": filename,
+            "label": label,
+            "box_2d": [x0, y0, x1, y1],
+            "page_index": page_index,
+        })
+    return out

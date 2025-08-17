@@ -1,12 +1,13 @@
 from __future__ import annotations
 
-from pathlib import Path
 import re
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from rich.console import Console
 
 from .gemini_client import (
+    ensure_uploaded_file,
     get_book_metadata_verbose,
     get_section_content_verbose,
     get_sections_from_pdf_verbose,
@@ -77,9 +78,18 @@ def _build_manifest_by_section(
     stem = output_epub.stem
     # 1) Get sections
     sections_debug = output_epub.parent / f"{stem}_sections_raw.json"
+    # Ensure the PDF is uploaded once; in tests DummyModel won't have chat APIs, so skip upload
+    uploaded = None
+    try:
+        if hasattr(client, "start_chat") or hasattr(client, "generate_content"):
+            uploaded = ensure_uploaded_file(str(input_pdf), console=console)
+    except Exception:
+        # In non-networked test contexts, proceed without an uploaded handle.
+        uploaded = None
     sections = get_sections_from_pdf_verbose(
         client,
         str(input_pdf),
+        uploaded_file=uploaded,
         console=console,
         debug_path=str(sections_debug) if debug else None,
     )
@@ -106,12 +116,23 @@ def _build_manifest_by_section(
         sec_type = str(sec.get("type", "section")).lower()
         title = str(sec.get("title", sec_type.title()))
         sec_debug = output_epub.parent / f"{stem}_sec{idx:02}_raw.json"
+        # Best-effort page range hint from sections list
+        pr = None
+        try:
+            ps = int(sec.get("page_start")) if sec.get("page_start") is not None else None
+            pe = int(sec.get("page_end")) if sec.get("page_end") is not None else None
+            if ps and pe and pe >= ps:
+                pr = (ps, pe)
+        except Exception:
+            pr = None
         data = get_section_content_verbose(
             client,
             str(input_pdf),
+            uploaded_file=uploaded,
             section_index=idx,
             section_type=sec_type,
             section_title=title,
+            page_range=pr,
             console=console,
             debug_path=str(sec_debug) if debug else None,
         )
@@ -140,7 +161,6 @@ def _build_manifest_by_section(
                 # - extremely thin bands (likely lines/highlights)
                 # - very large thin frames (page borders)
                 # - near-full-width thin strips (separators)
-                is_thin = (w < 0.02) or (h < 0.02)
                 very_thin = (w < 0.01) or (h < 0.01)
                 near_full_w = w > 0.95
                 near_full_h = h > 0.95
@@ -196,7 +216,7 @@ def _build_manifest_by_section(
                 pass
 
     book_title = input_pdf.stem
-    meta = _extract_metadata(client, input_pdf, output_epub, console, debug)
+    meta = _extract_metadata(client, input_pdf, output_epub, console, debug, uploaded)
     nav = _build_nav_xhtml(book_title, entries)
     nav = _soft_wrap_xhtml(nav, width=150)
     uid = meta.get("isbn") or "urn:uuid:00000000-0000-0000-0000-000000000000"
@@ -475,8 +495,8 @@ def _prepare_cover(
                 page = doc[0]
                 pix = page.get_pixmap(matrix=fitz.Matrix(2, 2), alpha=False)
                 data = pix.tobytes("jpeg")
-                doc.close()
                 # Return descriptor; caller will add file and manifest entries
+                doc.close()
                 return {
                     "image_id": "cover-image",
                     "image_href": "images/cover.jpg",
@@ -575,12 +595,13 @@ def _build_toc_ncx(uid: str, book_title: str, entries: List[Dict[str, str]]) -> 
     )
 
 
-def _extract_metadata(client, input_pdf: Path, output_epub: Path, console: Console, debug: bool) -> Dict[str, Any]:
+def _extract_metadata(client, input_pdf: Path, output_epub: Path, console: Console, debug: bool, uploaded_file=None) -> Dict[str, Any]:
     try:
         dbg_path = output_epub.parent / f"{output_epub.stem}_metadata_raw.json"
         return get_book_metadata_verbose(
             client,
             str(input_pdf),
+            uploaded_file=uploaded_file,
             console=console,
             debug_path=str(dbg_path) if debug else None,
         )
@@ -699,7 +720,6 @@ def _extract_and_register_images(
         filename = _sanitize_filename(str(it.get("filename", "")))
         page_index = it.get("page_index")
         box = it.get("box_2d")
-        label = str(it.get("label", ""))
         if not isinstance(page_index, int) or not isinstance(box, list) or len(box) != 4:
             continue
         pidx = page_index - 1
