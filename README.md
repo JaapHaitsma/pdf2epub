@@ -1,6 +1,6 @@
-# pdf2epub (uv project)
+# pdf2epub
 
-Convert a PDF to an EPUB using Google Gemini (2.5 Pro) with a simple, resilient CLI.
+Convert a PDF (even if it is scanned) to an EPUB using Google Gemini (2.5 Pro) with a simple, resilient CLI.
 
 ## Highlights
 
