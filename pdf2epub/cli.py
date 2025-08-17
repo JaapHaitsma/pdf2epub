@@ -20,7 +20,6 @@ class Args:
     input_pdf: Path
     output_epub: Path
     keep_sources: bool
-    by_section: bool
     debug: bool
     cover_image: Path | None
     auto_cover: bool
@@ -45,12 +44,6 @@ def parse_args(argv: list[str]) -> Args:
         "--keep-sources",
         action="store_true",
         help="Keep the unpacked EPUB files on disk",
-    )
-    parser.add_argument(
-        "--by-section",
-        action="store_true",
-        default=True,
-        help="Extract the book section-by-section (default and only mode)",
     )
     parser.add_argument(
         "--debug",
@@ -80,7 +73,6 @@ def parse_args(argv: list[str]) -> Args:
         input_pdf=input_pdf,
         output_epub=output_epub,
         keep_sources=ns.keep_sources,
-        by_section=True,  # only supported mode
     debug=bool(ns.debug),
     cover_image=ns.cover_image,
     auto_cover=not bool(ns.no_auto_cover),
@@ -110,7 +102,6 @@ def main(argv: list[str] | None = None) -> int:
             model=model,
             keep_sources=args.keep_sources,
             console=console,
-            by_section=True,
             debug=args.debug,
             cover_image_path=args.cover_image,
             auto_cover=args.auto_cover,
