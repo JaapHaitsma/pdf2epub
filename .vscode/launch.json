@@ -1,0 +1,21 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "pdf2epub: manifest (test.pdf)",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "pdf2epub.cli",
+            "args": [
+                "${workspaceFolder}/test.pdf",
+                "-o",
+                "${workspaceFolder}/test.epub",
+                "--keep-sources"
+            ],
+            "cwd": "${workspaceFolder}",
+            "envFile": "${workspaceFolder}/.env",
+            "console": "integratedTerminal",
+            "justMyCode": true
+        }
+    ]
+}

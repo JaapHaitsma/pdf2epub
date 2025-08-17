@@ -20,6 +20,7 @@ class Args:
     input_pdf: Path
     output_epub: Path
     keep_sources: bool
+    by_section: bool
 
 
 def parse_args(argv: list[str]) -> Args:
@@ -42,6 +43,11 @@ def parse_args(argv: list[str]) -> Args:
         action="store_true",
         help="Keep the unpacked EPUB files on disk",
     )
+    parser.add_argument(
+        "--by-section",
+        action="store_true",
+        help="Enumerate all book sections (front/back matter + chapters) and extract them individually",
+    )
 
     ns = parser.parse_args(argv)
     input_pdf: Path = ns.input_pdf
@@ -50,7 +56,12 @@ def parse_args(argv: list[str]) -> Args:
     else:
         output_epub = ns.output_epub
 
-    return Args(input_pdf=input_pdf, output_epub=output_epub, keep_sources=ns.keep_sources)
+    return Args(
+        input_pdf=input_pdf,
+        output_epub=output_epub,
+        keep_sources=ns.keep_sources,
+    by_section=ns.by_section,
+    )
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -76,6 +87,7 @@ def main(argv: list[str] | None = None) -> int:
             model=model,
             keep_sources=args.keep_sources,
             console=console,
+            by_section=args.by_section,
         )
     except FileNotFoundError as e:
         console.print(f"[red]File not found:[/] {e}")
