@@ -1,19 +1,19 @@
 from __future__ import annotations
 
-from pathlib import Path
 import xml.etree.ElementTree as ET
-from typing import Optional, Dict, Any, List
+from pathlib import Path
+from typing import Any, Dict, List, Optional
 
 from rich.console import Console
 
 from .gemini_client import (
+    get_book_metadata_verbose,
+    get_chapter_content_verbose,
+    get_section_content_verbose,
+    get_sections_from_pdf_verbose,
+    get_toc_from_pdf_verbose,
     init_client,
     upload_pdf_and_request_epub_manifest_verbose,
-    get_toc_from_pdf_verbose,
-    get_chapter_content_verbose,
-    get_sections_from_pdf_verbose,
-    get_section_content_verbose,
-    get_book_metadata_verbose,
 )
 from .packager import write_manifest_to_dir, zip_epub_from_dir
 
@@ -119,10 +119,11 @@ def _build_manifest_by_chapter(
             debug_path=str(ch_debug),
         )
         html_fragment: str = data.get("xhtml", "")
-        xhtml = _wrap_xhtml(title, html_fragment)
-        chapter_path = f"OEBPS/chapter-{idx:02}.xhtml"
-        files.append({"path": chapter_path, "content": xhtml, "encoding": "utf-8"})
-        chapter_entries.append({"id": f"chap{idx:02}", "href": chapter_path, "title": title})
+    xhtml = _wrap_xhtml(title, html_fragment)
+    rel_href = f"chapter-{idx:02}.xhtml"
+    file_path = f"OEBPS/{rel_href}"
+    files.append({"path": file_path, "content": xhtml, "encoding": "utf-8"})
+    chapter_entries.append({"id": f"chap{idx:02}", "href": rel_href, "title": title})
 
     # 3) Build nav.xhtml and content.opf
     book_title = input_pdf.stem
@@ -178,11 +179,12 @@ def _build_manifest_by_section(
         )
         html_fragment: str = data.get("xhtml", "")
         xhtml = _wrap_xhtml(title, html_fragment)
-        base = _logical_section_basename(sec_type, idx, title, used_names)
-        used_names.add(base)
-        section_path = f"OEBPS/{base}.xhtml"
-        files.append({"path": section_path, "content": xhtml, "encoding": "utf-8"})
-        entries.append({"id": f"sec{idx:02}", "href": section_path, "title": title, "type": sec_type})
+    base = _logical_section_basename(sec_type, idx, title, used_names)
+    used_names.add(base)
+    rel_href = f"{base}.xhtml"
+    file_path = f"OEBPS/{rel_href}"
+    files.append({"path": file_path, "content": xhtml, "encoding": "utf-8"})
+    entries.append({"id": f"sec{idx:02}", "href": rel_href, "title": title, "type": sec_type})
 
     book_title = input_pdf.stem
     meta = _extract_metadata(client, input_pdf, output_epub, console)
@@ -466,6 +468,14 @@ def _patch_opf_in_dir(out_dir: Path, meta: Dict[str, Any], console: Console) -> 
         for s in subjects:
             if s:
                 add_dc("subject", s)
+        # Also normalize manifest item hrefs to be relative to OPF dir (strip leading OEBPS/)
+        manifest = root.find("opf:manifest", ns)
+        if manifest is not None:
+            for item in manifest.findall("opf:item", ns):
+                href = item.get("href")
+                if isinstance(href, str) and href.startswith("OEBPS/"):
+                    item.set("href", href[len("OEBPS/"):])
+
         tree.write(opf_path, encoding="utf-8", xml_declaration=True)
         try:
             console.log(f"Patched metadata into OPF: {opf_path}")

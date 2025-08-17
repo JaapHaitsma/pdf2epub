@@ -1,7 +1,5 @@
 from pathlib import Path
 
-import builtins
-
 from pdf2epub import pipeline
 
 

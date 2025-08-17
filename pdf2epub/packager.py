@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 import zipfile
 from pathlib import Path
-from typing import Dict, Any, List
+from typing import Any, Dict
 
 
 def write_manifest_to_dir(manifest: Dict[str, Any], out_dir: Path) -> None:

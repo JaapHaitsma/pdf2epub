@@ -1,9 +1,8 @@
 from __future__ import annotations
 
-from typing import Iterable, List, Dict, Any, Optional
+from typing import Any, Dict, Iterable, List, Optional
 
 import google.generativeai as genai
-
 
 SYSTEM_PROMPT = (
     "You are a helpful editor. Clean and structure book-like text into chapters and sections. "
