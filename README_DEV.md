@@ -25,7 +25,7 @@ Prompts
 -   System prompt: preserve headings, lists, code; keep numbering prefixes/labels.
 -   Sections listing: return logical sections with titles preserving numbering.
 -   Section content: return JSON `{xhtml, images[]}`, keep numbering unchanged, include only meaningful figures (no decorative elements), normalized `box_2d`.
-	-   If a section exceeds token limits, we detect `finish_reason=MAX_TOKENS` and send follow-up “continue from the last sentence, JSON only, same shape” prompts, merging the returned JSON.
+    -   If a section exceeds token limits, we detect `finish_reason=MAX_TOKENS` and send follow-up “continue from the last sentence, JSON only, same shape” prompts, merging the returned JSON.
 
 Running
 
