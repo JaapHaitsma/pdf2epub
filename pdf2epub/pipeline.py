@@ -74,7 +74,8 @@ def _build_manifest_by_section(
     )
     files.append({"path": "OEBPS/styles.css", "content": css, "encoding": "utf-8"})
 
-    used_names: set[str] = set()
+    # Track how many times we've seen a given base name to avoid duplicates
+    used_counts: Dict[str, int] = {}
     for sec in sections:
         idx = int(sec.get("index", len(entries) + 1))
         sec_type = str(sec.get("type", "section")).lower()
@@ -89,10 +90,9 @@ def _build_manifest_by_section(
             console=console,
             debug_path=str(sec_debug),
         )
-        html_fragment: str = data.get("xhtml", "")
-        xhtml = _wrap_xhtml(title, html_fragment)
-    base = _logical_section_basename(sec_type, idx, title, used_names)
-    used_names.add(base)
+    html_fragment: str = data.get("xhtml", "")
+    xhtml = _wrap_xhtml(title, html_fragment)
+    base = _basename_from_title_or_type(title, sec_type, idx, used_counts)
     rel_href = f"{base}.xhtml"
     file_path = f"OEBPS/{rel_href}"
     files.append({"path": file_path, "content": xhtml, "encoding": "utf-8"})
@@ -283,49 +283,23 @@ def _slugify(text: str) -> str:
     return slug or "section"
 
 
-def _logical_section_basename(sec_type: str, idx: int, title: str, used: set[str]) -> str:
-    t = (sec_type or "section").lower()
-    # Common singletons
-    mapping = {
-        "title": "titlepage",
-        "copyright": "copyright",
-        "dedication": "dedication",
-        "preface": "preface",
-        "foreword": "foreword",
-        "prologue": "prologue",
-        "introduction": "introduction",
-        "toc": "toc",
-        "acknowledgments": "acknowledgments",
-        "acknowledgements": "acknowledgments",
-        "epilogue": "epilogue",
-        "afterword": "afterword",
-        "notes": "notes",
-        "glossary": "glossary",
-        "bibliography": "bibliography",
-        "index": "index",
-    }
-    base = None
-    if t == "chapter":
-        base = f"chapter-{idx:02}"
-    elif t == "appendix":
-        base = f"appendix-{idx:02}"
-    elif t in mapping:
-        base = mapping[t]
-        # Ensure uniqueness if multiple of same singleton appear
-        if base in used:
-            base = f"{base}-{idx:02}"
-    else:
-        # Fall back to title-based slug or type-index
-        slug = _slugify(title) if title else None
-        base = slug or f"section-{idx:02}"
-        if base in used:
-            base = f"section-{idx:02}"
-    # Final collision guard
-    if base in used:
-        k = 2
-        candidate = f"{base}-{k:02}"
-        while candidate in used:
-            k += 1
-            candidate = f"{base}-{k:02}"
-        base = candidate
-    return base
+def _basename_from_title_or_type(title: str, sec_type: str, idx: int, used_counts: Dict[str, int]) -> str:
+    """Derive file basename from Gemini's section title; ensure uniqueness.
+
+    Rules:
+    - Primary: slugified title from Gemini. If empty, fallback to slugified type.
+    - If still empty, fallback to "section".
+    - If the same basename repeats, append a numeric suffix starting at -01, then -02, etc.
+      The very first occurrence has no suffix.
+    """
+    base = _slugify(title) if title else ""
+    if not base:
+        base = _slugify(sec_type) if sec_type else "section"
+    if not base:
+        base = "section"
+    count = used_counts.get(base, 0) + 1
+    used_counts[base] = count
+    if count == 1:
+        return base
+    # First duplicate gets -01, then -02, ...
+    return f"{base}-{count - 1:02}"
