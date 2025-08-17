@@ -22,6 +22,8 @@ class Args:
     keep_sources: bool
     by_section: bool
     debug: bool
+    cover_image: Path | None
+    auto_cover: bool
 
 
 def parse_args(argv: list[str]) -> Args:
@@ -55,6 +57,17 @@ def parse_args(argv: list[str]) -> Args:
         action="store_true",
         help="Write raw Gemini JSON responses (sections, section content, metadata) next to the output",
     )
+    parser.add_argument(
+        "--cover-image",
+        type=Path,
+        default=None,
+        help="Path to an image file to use as the book cover (overrides auto cover)",
+    )
+    parser.add_argument(
+        "--no-auto-cover",
+        action="store_true",
+        help="Disable using the first PDF page as a cover when no --cover-image is provided",
+    )
 
     ns = parser.parse_args(argv)
     input_pdf: Path = ns.input_pdf
@@ -69,6 +82,8 @@ def parse_args(argv: list[str]) -> Args:
         keep_sources=ns.keep_sources,
         by_section=True,  # only supported mode
     debug=bool(ns.debug),
+    cover_image=ns.cover_image,
+    auto_cover=not bool(ns.no_auto_cover),
     )
 
 
@@ -97,6 +112,8 @@ def main(argv: list[str] | None = None) -> int:
             console=console,
             by_section=True,
             debug=args.debug,
+            cover_image_path=args.cover_image,
+            auto_cover=args.auto_cover,
         )
     except FileNotFoundError as e:
         console.print(f"[red]File not found:[/] {e}")

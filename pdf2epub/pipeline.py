@@ -24,6 +24,8 @@ def convert_pdf_to_epub(
     console: Optional[Console] = None,
     by_section: bool = False,
     debug: bool = False,
+    cover_image_path: Optional[Path] = None,
+    auto_cover: bool = True,
 ) -> None:
     console = console or Console()
 
@@ -35,7 +37,15 @@ def convert_pdf_to_epub(
 
     # Only section-by-section mode is supported
     console.log("Using section-by-section mode…")
-    manifest = _build_manifest_by_section(client, input_pdf, output_epub, console, debug)
+    manifest = _build_manifest_by_section(
+        client,
+        input_pdf,
+        output_epub,
+        console,
+        debug,
+        cover_image_path=cover_image_path,
+        auto_cover=auto_cover,
+    )
     temp_dir = output_epub.parent / (output_epub.stem + "_epub_src")
     if temp_dir.exists():
         # Best-effort clean
@@ -55,7 +65,14 @@ def convert_pdf_to_epub(
 
 
 def _build_manifest_by_section(
-    client, input_pdf: Path, output_epub: Path, console: Console, debug: bool
+    client,
+    input_pdf: Path,
+    output_epub: Path,
+    console: Console,
+    debug: bool,
+    *,
+    cover_image_path: Optional[Path] = None,
+    auto_cover: bool = True,
 ) -> Dict[str, Any]:
     stem = output_epub.stem
     # 1) Get sections
@@ -184,10 +201,44 @@ def _build_manifest_by_section(
     nav = _soft_wrap_xhtml(nav, width=150)
     uid = meta.get("isbn") or "urn:uuid:00000000-0000-0000-0000-000000000000"
     ncx = _build_toc_ncx(uid, book_title, entries)
+    # Optional cover image handling (user-provided takes precedence; else auto from first page if enabled)
+    cover: Optional[Dict[str, Any]] = None
+    try:
+        cover = _prepare_cover(input_pdf, cover_image_path, auto_cover, console)
+    except Exception as e:
+        try:
+            console.log(f"Cover preparation failed: {e}")
+        except Exception:
+            pass
+
     # Merge image_files into files and declare in OPF
     for img in image_files:
         files.append(img)
-    opf = _build_content_opf(book_title, entries, meta, include_ncx=True, extra_items=image_manifest)
+    # If we have a cover, add its files (image + cover.xhtml)
+    if cover:
+        # Add image binary
+        img_href = str(cover.get("image_href", "images/cover.jpg"))
+        img_bytes = cover.get("binary", b"")
+        if isinstance(img_bytes, (bytes, bytearray)) and img_bytes:
+            files.append({
+                "path": f"OEBPS/{img_href}",
+                "content": bytes(img_bytes),
+                "encoding": None,
+            })
+        # Add cover page
+        files.append({
+            "path": "OEBPS/cover.xhtml",
+            "content": _build_cover_xhtml(img_href),
+            "encoding": "utf-8",
+        })
+    opf = _build_content_opf(
+        book_title,
+        entries,
+        meta,
+        include_ncx=True,
+        extra_items=image_manifest,
+        cover=cover,
+    )
     files.append({"path": "OEBPS/nav.xhtml", "content": nav, "encoding": "utf-8"})
     files.append({"path": "OEBPS/toc.ncx", "content": ncx, "encoding": "utf-8"})
     files.append({"path": "OEBPS/content.opf", "content": opf, "encoding": "utf-8"})
@@ -251,7 +302,14 @@ def _ensure_title_heading(title: str, fragment: str) -> str:
     return f"<h1>{_escape_xml(t)}</h1>\n" + (fragment or "")
 
 
-def _build_content_opf(book_title: str, entries: List[Dict[str, str]], meta: Dict[str, Any] | None = None, include_ncx: bool = False, extra_items: List[Dict[str, str]] | None = None) -> str:
+def _build_content_opf(
+    book_title: str,
+    entries: List[Dict[str, str]],
+    meta: Dict[str, Any] | None = None,
+    include_ncx: bool = False,
+    extra_items: List[Dict[str, str]] | None = None,
+    cover: Optional[Dict[str, str]] = None,
+) -> str:
     meta = meta or {}
     extra_items = extra_items or []
     dc_creators = "\n".join(
@@ -282,7 +340,19 @@ def _build_content_opf(book_title: str, entries: List[Dict[str, str]], meta: Dic
     ]
     if include_ncx:
         manifest_items.insert(0, "    <item id='ncx' href='toc.ncx' media-type='application/x-dtbncx+xml'/>")
+    # If cover present, declare cover page + image in manifest
+    if cover:
+        cover_page_href = _escape_xml(cover.get("page_href", "cover.xhtml"))
+        cover_page_id = _escape_xml(cover.get("page_id", "cover"))
+        cover_img_href = _escape_xml(cover.get("image_href", "images/cover.jpg"))
+        cover_img_id = _escape_xml(cover.get("image_id", "cover-image"))
+        cover_img_media = _escape_xml(cover.get("image_media", "image/jpeg"))
+        manifest_items.append(f"    <item id='{cover_page_id}' href='{cover_page_href}' media-type='application/xhtml+xml'/>")
+        manifest_items.append(f"    <item id='{cover_img_id}' href='{cover_img_href}' media-type='{cover_img_media}'/>")
     spine_items = []
+    # Put cover first in spine if present
+    if cover:
+        spine_items.append("    <itemref idref='" + _escape_xml(cover.get("page_id", "cover")) + "'/>")
     for ch in entries:
         chap_id = ch["id"]
         href = ch["href"]
@@ -301,6 +371,16 @@ def _build_content_opf(book_title: str, entries: List[Dict[str, str]], meta: Dic
     spine_xml = "\n".join(spine_items)
     pkg_version = "2.0" if include_ncx else "3.0"
     spine_open = "  <spine toc='ncx'>\n" if include_ncx else "  <spine>\n"
+    # Additional metadata for cover and guide entry (EPUB 2 compatibility)
+    extra_meta = ""
+    guide_xml = ""
+    if cover:
+        extra_meta = "    <meta name='cover' content='" + _escape_xml(cover.get("image_id", "cover-image")) + "'/>\n"
+        guide_xml = (
+            "  <guide>\n"
+            "    <reference type='cover' title='Cover' href='" + _escape_xml(cover.get("page_href", "cover.xhtml")) + "'/>\n"
+            "  </guide>\n"
+        )
     return (
         "<?xml version='1.0' encoding='utf-8'?>\n"
         f"<package xmlns='http://www.idpf.org/2007/opf' version='{pkg_version}' unique-identifier='bookid'>\n"
@@ -314,6 +394,7 @@ def _build_content_opf(book_title: str, entries: List[Dict[str, str]], meta: Dic
         f"{dc_description}"
         f"{dc_subjects}\n"
         "    <meta property='dcterms:modified'>1970-01-01T00:00:00Z</meta>\n"
+        f"{extra_meta}"
         "  </metadata>\n"
         "  <manifest>\n"
         f"{manifest_xml}\n"
@@ -321,8 +402,108 @@ def _build_content_opf(book_title: str, entries: List[Dict[str, str]], meta: Dic
         f"{spine_open}"
         f"{spine_xml}\n"
         "  </spine>\n"
+        f"{guide_xml}"
         "</package>\n"
     )
+
+
+def _build_cover_xhtml(img_href: str) -> str:
+    return (
+        "<?xml version='1.0' encoding='utf-8'?>\n"
+    "<html xmlns='http://www.idpf.org/2007/ops' xmlns:xhtml='http://www.w3.org/1999/xhtml' xml:lang='en'>\n"
+        "  <head>\n"
+        "    <title>Cover</title>\n"
+        "    <meta charset='utf-8'/>\n"
+        "    <link rel='stylesheet' type='text/css' href='styles.css'/>\n"
+        "    <style>body,html{margin:0;padding:0}.cover{display:flex;align-items:center;justify-content:center;min-height:98vh}img{max-width:100%;height:auto;display:block}</style>\n"
+        "  </head>\n"
+        "  <body>\n"
+        "    <div class='cover'>\n"
+    "      <img src='" + _escape_xml(img_href) + "' alt='Cover'/>\n"
+        "    </div>\n"
+        "  </body>\n"
+        "</html>\n"
+    )
+
+
+def _prepare_cover(
+    pdf_path: Path,
+    cover_image_path: Optional[Path],
+    auto_cover: bool,
+    console: Optional[Console],
+) -> Optional[Dict[str, str]]:
+    """Return cover dict and stage the image into images/cover.jpg via manifest extra items.
+
+    The actual OPF writing is handled in _build_content_opf; here we ensure the image
+    file entry is available to be written by the packager by appending to files is not possible here,
+    so we prepare a cover descriptor and also add the binary file into the global image files list
+    via returned info. To keep changes minimal, we'll write the image through the extra manifest path
+    by piggybacking on the main function adding files right before OPF build.
+    """
+    # If an explicit image is provided, use it
+    if cover_image_path and cover_image_path.exists():
+        try:
+            data = cover_image_path.read_bytes()
+            media = _mime_from_ext(cover_image_path.suffix)
+            ext = (cover_image_path.suffix or ".jpg").lower().lstrip(".")
+            if ext not in ("jpg", "jpeg", "png"):
+                ext = "jpg"
+                media = "image/jpeg"
+            href = f"images/cover.{ 'jpg' if ext == 'jpeg' else ext }"
+            return {
+                "image_id": "cover-image",
+                "image_href": href,
+                "image_media": media,
+                "page_id": "cover",
+                "page_href": "cover.xhtml",
+                "binary": data,
+            }
+        except Exception as e:
+            if console:
+                try:
+                    console.log(f"Failed to read cover image: {e}")
+                except Exception:
+                    pass
+            return None
+    # auto cover from first page
+    if auto_cover and pdf_path.exists():
+        try:
+            import importlib
+            fitz = importlib.import_module("fitz")  # type: ignore[assignment]
+            doc = fitz.open(str(pdf_path))
+            if len(doc) > 0:
+                page = doc[0]
+                pix = page.get_pixmap(matrix=fitz.Matrix(2, 2), alpha=False)
+                data = pix.tobytes("jpeg")
+                doc.close()
+                # Return descriptor; caller will add file and manifest entries
+                return {
+                    "image_id": "cover-image",
+                    "image_href": "images/cover.jpg",
+                    "image_media": "image/jpeg",
+                    "page_id": "cover",
+                    "page_href": "cover.xhtml",
+                    "binary": data,
+                }
+            doc.close()
+        except Exception as e:
+            if console:
+                try:
+                    console.log(f"Auto cover extraction failed: {e}")
+                except Exception:
+                    pass
+    return None
+
+def _mime_from_ext(ext: str) -> str:
+    e = (ext or "").lower().lstrip(".")
+    if e in ("jpg", "jpeg"):
+        return "image/jpeg"
+    if e == "png":
+        return "image/png"
+    if e == "webp":
+        return "image/webp"
+    return "application/octet-stream"
+
 
 
 def _soft_wrap_xhtml(xhtml: str, width: int = 150) -> str:
