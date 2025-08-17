@@ -46,7 +46,8 @@ def parse_args(argv: list[str]) -> Args:
     parser.add_argument(
         "--by-section",
         action="store_true",
-        help="Enumerate all book sections (front/back matter + chapters) and extract them individually",
+        default=True,
+        help="Extract the book section-by-section (default and only mode)",
     )
 
     ns = parser.parse_args(argv)
@@ -60,7 +61,7 @@ def parse_args(argv: list[str]) -> Args:
         input_pdf=input_pdf,
         output_epub=output_epub,
         keep_sources=ns.keep_sources,
-    by_section=ns.by_section,
+        by_section=True,  # only supported mode
     )
 
 
@@ -87,7 +88,7 @@ def main(argv: list[str] | None = None) -> int:
             model=model,
             keep_sources=args.keep_sources,
             console=console,
-            by_section=args.by_section,
+            by_section=True,
         )
     except FileNotFoundError as e:
         console.print(f"[red]File not found:[/] {e}")

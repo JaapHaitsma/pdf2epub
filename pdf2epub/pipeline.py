@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -8,12 +7,9 @@ from rich.console import Console
 
 from .gemini_client import (
     get_book_metadata_verbose,
-    get_chapter_content_verbose,
     get_section_content_verbose,
     get_sections_from_pdf_verbose,
-    get_toc_from_pdf_verbose,
     init_client,
-    upload_pdf_and_request_epub_manifest_verbose,
 )
 from .packager import write_manifest_to_dir, zip_epub_from_dir
 
@@ -35,30 +31,9 @@ def convert_pdf_to_epub(
     console.log(f"Reading PDF: {input_pdf}")
     client = init_client(api_key=api_key, model=model)
 
-    used_mode = "manifest"
-    if by_section:
-        console.log("Using section-by-section mode…")
-        manifest = _build_manifest_by_section(client, input_pdf, output_epub, console)
-        used_mode = "section"
-    else:
-        console.log("Delegating EPUB generation to Gemini (manifest mode)…")
-        try:
-            debug_json = (output_epub.parent / (output_epub.stem + "_manifest_raw.json"))
-            try:
-                manifest = upload_pdf_and_request_epub_manifest_verbose(
-                    client,
-                    str(input_pdf),
-                    console=console,
-                    debug_path=str(debug_json),
-                )
-            except TypeError:
-                # Back-compat for tests or older mocks that don't accept kwargs
-                manifest = upload_pdf_and_request_epub_manifest_verbose(client, str(input_pdf))
-        except Exception as e:
-            console.print(f"[yellow]Manifest mode failed:[/] {e}")
-            console.log("Falling back to section-by-section mode…")
-            manifest = _build_manifest_by_section(client, input_pdf, output_epub, console)
-            used_mode = "section"
+    # Only section-by-section mode is supported
+    console.log("Using section-by-section mode…")
+    manifest = _build_manifest_by_section(client, input_pdf, output_epub, console)
     temp_dir = output_epub.parent / (output_epub.stem + "_epub_src")
     if temp_dir.exists():
         # Best-effort clean
@@ -66,11 +41,6 @@ def convert_pdf_to_epub(
         shutil.rmtree(temp_dir)
     temp_dir.mkdir(parents=True, exist_ok=True)
     write_manifest_to_dir(manifest, temp_dir)
-    # If we used manifest mode, try to patch OPF with extracted metadata
-    if used_mode == "manifest":
-        meta = _extract_metadata(client, input_pdf, output_epub, console)
-        if meta:
-            _patch_opf_in_dir(temp_dir, meta, console)
     console.log("Zipping EPUB…")
     zip_epub_from_dir(temp_dir, output_epub)
     if not keep_sources:
@@ -80,64 +50,6 @@ def convert_pdf_to_epub(
         except Exception:
             pass
     return
-
-
-def _build_manifest_by_chapter(
-    client, input_pdf: Path, output_epub: Path, console: Console
-) -> Dict[str, Any]:
-    stem = output_epub.stem
-    # 1) Get TOC
-    toc_debug = output_epub.parent / f"{stem}_toc_raw.json"
-    chapters = get_toc_from_pdf_verbose(
-        client, str(input_pdf), console=console, debug_path=str(toc_debug)
-    )
-    # Fallback if empty TOC: assume a single chapter titled by filename
-    if not chapters:
-        chapters = [{"index": 1, "title": input_pdf.stem}]
-
-    # 2) Fetch each chapter content
-    chapter_entries: List[Dict[str, Any]] = []
-    files: List[Dict[str, Any]] = []
-
-    # Basic stylesheet
-    css = (
-        "body{font-family:serif;line-height:1.5;} h1,h2,h3{font-family:sans-serif;} "
-        "img{max-width:100%; height:auto;} code,pre{font-family:monospace;}"
-    )
-    files.append({"path": "OEBPS/styles.css", "content": css, "encoding": "utf-8"})
-
-    for chap in chapters:
-        idx = int(chap.get("index", len(chapter_entries) + 1))
-        title = str(chap.get("title", f"Chapter {idx}"))
-        ch_debug = output_epub.parent / f"{stem}_ch{idx:02}_raw.json"
-        data = get_chapter_content_verbose(
-            client,
-            str(input_pdf),
-            chapter_index=idx,
-            chapter_title=title,
-            console=console,
-            debug_path=str(ch_debug),
-        )
-        html_fragment: str = data.get("xhtml", "")
-    xhtml = _wrap_xhtml(title, html_fragment)
-    rel_href = f"chapter-{idx:02}.xhtml"
-    file_path = f"OEBPS/{rel_href}"
-    files.append({"path": file_path, "content": xhtml, "encoding": "utf-8"})
-    chapter_entries.append({"id": f"chap{idx:02}", "href": rel_href, "title": title})
-
-    # 3) Build nav.xhtml and content.opf
-    book_title = input_pdf.stem
-    meta = _extract_metadata(client, input_pdf, output_epub, console)
-    nav = _build_nav_xhtml(book_title, chapter_entries)
-    # Build NCX for broader reader compatibility
-    uid = meta.get("isbn") or "urn:uuid:00000000-0000-0000-0000-000000000000"
-    ncx = _build_toc_ncx(uid, book_title, chapter_entries)
-    opf = _build_content_opf(book_title, chapter_entries, meta, include_ncx=True)
-    files.append({"path": "OEBPS/nav.xhtml", "content": nav, "encoding": "utf-8"})
-    files.append({"path": "OEBPS/toc.ncx", "content": ncx, "encoding": "utf-8"})
-    files.append({"path": "OEBPS/content.opf", "content": opf, "encoding": "utf-8"})
-
-    return {"files": files}
 
 
 def _build_manifest_by_section(
@@ -417,70 +329,3 @@ def _logical_section_basename(sec_type: str, idx: int, title: str, used: set[str
             candidate = f"{base}-{k:02}"
         base = candidate
     return base
-
-
-def _patch_opf_in_dir(out_dir: Path, meta: Dict[str, Any], console: Console) -> None:
-    try:
-        # Find an OPF file (common path OEBPS/content.opf)
-        opfs = list(out_dir.rglob("*.opf"))
-        if not opfs:
-            return
-        opf_path = opfs[0]
-        tree = ET.parse(opf_path)
-        root = tree.getroot()
-        ns = {"opf": "http://www.idpf.org/2007/opf", "dc": "http://purl.org/dc/elements/1.1/"}
-        # Ensure metadata element exists
-        metadata = root.find("opf:metadata", ns)
-        if metadata is None:
-            metadata = ET.SubElement(root, f"{{{ns['opf']}}}metadata")
-        # Helper to append a dc element
-        def add_dc(tag: str, text: str):
-            el = ET.SubElement(metadata, f"{{{ns['dc']}}}{tag}")
-            el.text = text
-
-        title = meta.get("title")
-        if title:
-            add_dc("title", title)
-        authors = meta.get("authors") or []
-        for a in authors:
-            if a:
-                add_dc("creator", a)
-        identifier = meta.get("isbn")
-        if identifier:
-            el = ET.SubElement(metadata, f"{{{ns['dc']}}}identifier", attrib={"id": "bookid"})
-            el.text = identifier
-            # Set unique-identifier on package if not present
-            if "unique-identifier" not in root.attrib:
-                root.set("unique-identifier", "bookid")
-        lang = meta.get("language")
-        if lang:
-            add_dc("language", lang)
-        publisher = meta.get("publisher")
-        if publisher:
-            add_dc("publisher", publisher)
-        date = meta.get("date")
-        if date:
-            add_dc("date", date)
-        description = meta.get("description")
-        if description:
-            add_dc("description", description)
-        subjects = meta.get("subjects") or []
-        for s in subjects:
-            if s:
-                add_dc("subject", s)
-        # Also normalize manifest item hrefs to be relative to OPF dir (strip leading OEBPS/)
-        manifest = root.find("opf:manifest", ns)
-        if manifest is not None:
-            for item in manifest.findall("opf:item", ns):
-                href = item.get("href")
-                if isinstance(href, str) and href.startswith("OEBPS/"):
-                    item.set("href", href[len("OEBPS/"):])
-
-        tree.write(opf_path, encoding="utf-8", xml_declaration=True)
-        try:
-            console.log(f"Patched metadata into OPF: {opf_path}")
-        except Exception:
-            pass
-    except Exception:
-        # Best effort; don't fail the whole build for OPF patch issues
-        pass
