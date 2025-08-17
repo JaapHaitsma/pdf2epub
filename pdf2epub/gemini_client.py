@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from typing import Any, Dict, Iterable, List, Optional
+import time
 
 import google.generativeai as genai
 
@@ -51,46 +52,78 @@ def get_sections_from_pdf_verbose(
         "'title','copyright','dedication','preface','foreword','prologue','introduction','toc','chapter','appendix','acknowledgments','epilogue','afterword','notes','glossary','bibliography','index', \"title\": string}]}. "
         "Focus on logical structure, not pages. Do not include full content here."
     )
-    stream = model.generate_content(
-        [instruction, file],
-        stream=True,
-        generation_config={"response_mime_type": "application/json"},
-    )
-    collected: List[str] = []
-    for chunk in stream:
+    text = ""
+    # Try streaming first; if it throws (e.g., 504), fall back to non-streaming with retries
+    try:
+        stream = model.generate_content(
+            [instruction, file],
+            stream=True,
+            generation_config={"response_mime_type": "application/json"},
+        )
+        collected: List[str] = []
         try:
-            t = getattr(chunk, "text", None) or ""
-        except Exception:
-            t = ""
-        if t:
-            collected.append(t)
+            for chunk in stream:
+                try:
+                    t = getattr(chunk, "text", None) or ""
+                except Exception:
+                    t = ""
+                if t:
+                    collected.append(t)
+                    if console:
+                        try:
+                            console.out.write(t)
+                            console.out.flush()
+                        except Exception:
+                            try:
+                                console.print(t)
+                            except Exception:
+                                pass
+        except Exception as e:  # streaming failed mid-way
             if console:
                 try:
-                    console.out.write(t)
-                    console.out.flush()
+                    console.log(f"Streaming failed, will retry without streaming: {e}")
                 except Exception:
-                    try:
-                        console.print(t)
-                    except Exception:
-                        pass
-    if console:
-        try:
-            console.out.write("\n")
-            console.out.flush()
-        except Exception:
-            console.print("")
-    text = ("".join(collected)).strip()
+                    pass
+            collected = []
+        # best-effort newline after streaming
+        if console:
+            try:
+                console.out.write("\n")
+                console.out.flush()
+            except Exception:
+                try:
+                    console.print("")
+                except Exception:
+                    pass
+        text = ("".join(collected)).strip()
+    except Exception as e:
+        if console:
+            try:
+                console.log(f"Stream request failed to start, will retry without streaming: {e}")
+            except Exception:
+                pass
     if not text:
         if console:
             try:
-                console.log("No streamed text; retrying sections request without streaming…")
+                console.log("Retrying sections request without streaming (with backoff)…")
             except Exception:
                 pass
-        resp = model.generate_content(
-            [instruction, file],
-            generation_config={"response_mime_type": "application/json"},
-        )
-        text = _extract_text_from_response(resp).strip()
+        last_err: Optional[Exception] = None
+        for attempt in range(3):
+            try:
+                resp = model.generate_content(
+                    [instruction, file],
+                    generation_config={"response_mime_type": "application/json"},
+                )
+                text = _extract_text_from_response(resp).strip()
+                if text:
+                    break
+            except Exception as e:
+                last_err = e
+            # backoff before next try
+            time.sleep(2 ** attempt)
+        if not text and last_err:
+            raise last_err
     if debug_path:
         try:
             from pathlib import Path
@@ -134,51 +167,80 @@ def get_section_content_verbose(
         "Do not include images or <img> tags; summarize any figure captions in text. \n"
         f"Return only JSON. Section to extract: index={section_index}, type=\"{safe_type}\", title=\"{safe_title}\"."
     )
-    stream = model.generate_content(
-        [instruction, file],
-        stream=True,
-        generation_config={"response_mime_type": "application/json"},
-    )
-    if console:
+    text = ""
+    try:
+        stream = model.generate_content(
+            [instruction, file],
+            stream=True,
+            generation_config={"response_mime_type": "application/json"},
+        )
+        if console:
+            try:
+                console.log("Streaming section content from Gemini…")
+            except Exception:
+                pass
+        collected: List[str] = []
         try:
-            console.log("Streaming section content from Gemini…")
-        except Exception:
-            pass
-    collected: List[str] = []
-    for chunk in stream:
-        try:
-            t = getattr(chunk, "text", None) or ""
-        except Exception:
-            t = ""
-        if t:
-            collected.append(t)
+            for chunk in stream:
+                try:
+                    t = getattr(chunk, "text", None) or ""
+                except Exception:
+                    t = ""
+                if t:
+                    collected.append(t)
+                    if console:
+                        try:
+                            console.out.write(t)
+                            console.out.flush()
+                        except Exception:
+                            try:
+                                console.print(t)
+                            except Exception:
+                                pass
+        except Exception as e:
             if console:
                 try:
-                    console.out.write(t)
-                    console.out.flush()
+                    console.log(f"Streaming failed, will retry without streaming: {e}")
                 except Exception:
-                    try:
-                        console.print(t)
-                    except Exception:
-                        pass
-    if console:
-        try:
-            console.out.write("\n")
-            console.out.flush()
-        except Exception:
-            console.print("")
-    text = ("".join(collected)).strip()
+                    pass
+            collected = []
+        if console:
+            try:
+                console.out.write("\n")
+                console.out.flush()
+            except Exception:
+                try:
+                    console.print("")
+                except Exception:
+                    pass
+        text = ("".join(collected)).strip()
+    except Exception as e:
+        if console:
+            try:
+                console.log(f"Stream request failed to start, will retry without streaming: {e}")
+            except Exception:
+                pass
     if not text:
         if console:
             try:
-                console.log("No streamed text; retrying section request without streaming…")
+                console.log("Retrying section request without streaming (with backoff)…")
             except Exception:
                 pass
-        resp = model.generate_content(
-            [instruction, file],
-            generation_config={"response_mime_type": "application/json"},
-        )
-        text = _extract_text_from_response(resp).strip()
+        last_err: Optional[Exception] = None
+        for attempt in range(3):
+            try:
+                resp = model.generate_content(
+                    [instruction, file],
+                    generation_config={"response_mime_type": "application/json"},
+                )
+                text = _extract_text_from_response(resp).strip()
+                if text:
+                    break
+            except Exception as e:
+                last_err = e
+            time.sleep(2 ** attempt)
+        if not text and last_err:
+            raise last_err
     if debug_path:
         try:
             from pathlib import Path
@@ -218,46 +280,75 @@ def get_book_metadata_verbose(
         "language (ISO 639-1 like 'en' if known); publisher (string); date (YYYY or YYYY-MM or YYYY-MM-DD); "
         "description (string summary); subjects (array of strings)."
     )
-    stream = model.generate_content(
-        [instruction, file],
-        stream=True,
-        generation_config={"response_mime_type": "application/json"},
-    )
-    collected: List[str] = []
-    for chunk in stream:
+    text = ""
+    try:
+        stream = model.generate_content(
+            [instruction, file],
+            stream=True,
+            generation_config={"response_mime_type": "application/json"},
+        )
+        collected: List[str] = []
         try:
-            t = getattr(chunk, "text", None) or ""
-        except Exception:
-            t = ""
-        if t:
-            collected.append(t)
+            for chunk in stream:
+                try:
+                    t = getattr(chunk, "text", None) or ""
+                except Exception:
+                    t = ""
+                if t:
+                    collected.append(t)
+                    if console:
+                        try:
+                            console.out.write(t)
+                            console.out.flush()
+                        except Exception:
+                            try:
+                                console.print(t)
+                            except Exception:
+                                pass
+        except Exception as e:
             if console:
                 try:
-                    console.out.write(t)
-                    console.out.flush()
+                    console.log(f"Streaming failed, will retry without streaming: {e}")
                 except Exception:
-                    try:
-                        console.print(t)
-                    except Exception:
-                        pass
-    if console:
-        try:
-            console.out.write("\n")
-            console.out.flush()
-        except Exception:
-            console.print("")
-    text = ("".join(collected)).strip()
+                    pass
+            collected = []
+        if console:
+            try:
+                console.out.write("\n")
+                console.out.flush()
+            except Exception:
+                try:
+                    console.print("")
+                except Exception:
+                    pass
+        text = ("".join(collected)).strip()
+    except Exception as e:
+        if console:
+            try:
+                console.log(f"Stream request failed to start, will retry without streaming: {e}")
+            except Exception:
+                pass
     if not text:
         if console:
             try:
-                console.log("No streamed text; retrying metadata request without streaming…")
+                console.log("Retrying metadata request without streaming (with backoff)…")
             except Exception:
                 pass
-        resp = model.generate_content(
-            [instruction, file],
-            generation_config={"response_mime_type": "application/json"},
-        )
-        text = _extract_text_from_response(resp).strip()
+        last_err: Optional[Exception] = None
+        for attempt in range(3):
+            try:
+                resp = model.generate_content(
+                    [instruction, file],
+                    generation_config={"response_mime_type": "application/json"},
+                )
+                text = _extract_text_from_response(resp).strip()
+                if text:
+                    break
+            except Exception as e:
+                last_err = e
+            time.sleep(2 ** attempt)
+        if not text and last_err:
+            raise last_err
     if debug_path:
         try:
             from pathlib import Path
