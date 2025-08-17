@@ -21,6 +21,7 @@ class Args:
     output_epub: Path
     keep_sources: bool
     debug: bool
+    stream: bool
     cover_image: Path | None
     auto_cover: bool
 
@@ -51,6 +52,11 @@ def parse_args(argv: list[str]) -> Args:
         help="Write raw Gemini JSON responses (sections, section content, metadata) next to the output",
     )
     parser.add_argument(
+        "--stream",
+        action="store_true",
+        help="Stream Gemini responses to the console in real-time (noisy)",
+    )
+    parser.add_argument(
         "--cover-image",
         type=Path,
         default=None,
@@ -74,6 +80,7 @@ def parse_args(argv: list[str]) -> Args:
         output_epub=output_epub,
         keep_sources=ns.keep_sources,
     debug=bool(ns.debug),
+    stream=bool(ns.stream),
     cover_image=ns.cover_image,
     auto_cover=not bool(ns.no_auto_cover),
     )
@@ -103,6 +110,7 @@ def main(argv: list[str] | None = None) -> int:
             keep_sources=args.keep_sources,
             console=console,
             debug=args.debug,
+            stream=args.stream,
             cover_image_path=args.cover_image,
             auto_cover=args.auto_cover,
         )

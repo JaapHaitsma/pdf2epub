@@ -25,6 +25,7 @@ def convert_pdf_to_epub(
     console: Optional[Console] = None,
     by_section: bool = False,
     debug: bool = False,
+    stream: bool = False,
     cover_image_path: Optional[Path] = None,
     auto_cover: bool = True,
 ) -> None:
@@ -42,8 +43,9 @@ def convert_pdf_to_epub(
         client,
         input_pdf,
         output_epub,
-        console,
+    console,
         debug,
+    stream=stream,
         cover_image_path=cover_image_path,
         auto_cover=auto_cover,
     )
@@ -72,6 +74,7 @@ def _build_manifest_by_section(
     console: Console,
     debug: bool,
     *,
+    stream: bool = False,
     cover_image_path: Optional[Path] = None,
     auto_cover: bool = True,
 ) -> Dict[str, Any]:
@@ -91,10 +94,15 @@ def _build_manifest_by_section(
         str(input_pdf),
         uploaded_file=uploaded,
         console=console,
+        stream=stream,
         debug_path=str(sections_debug) if debug else None,
     )
     if not sections:
         # Fallback to a single generic section
+        try:
+            console.log("No sections returned by Gemini; falling back to a single section.")
+        except Exception:
+            pass
         sections = [{"index": 1, "type": "section", "title": input_pdf.stem}]
 
     files: List[Dict[str, Any]] = []
@@ -134,6 +142,7 @@ def _build_manifest_by_section(
             section_title=title,
             page_range=pr,
             console=console,
+            stream=stream,
             debug_path=str(sec_debug) if debug else None,
         )
         html_fragment: str = data.get("xhtml", "")
@@ -216,7 +225,7 @@ def _build_manifest_by_section(
                 pass
 
     book_title = input_pdf.stem
-    meta = _extract_metadata(client, input_pdf, output_epub, console, debug, uploaded)
+    meta = _extract_metadata(client, input_pdf, output_epub, console, debug, uploaded, stream=stream)
     nav = _build_nav_xhtml(book_title, entries)
     nav = _soft_wrap_xhtml(nav, width=150)
     uid = meta.get("isbn") or "urn:uuid:00000000-0000-0000-0000-000000000000"
@@ -595,7 +604,7 @@ def _build_toc_ncx(uid: str, book_title: str, entries: List[Dict[str, str]]) -> 
     )
 
 
-def _extract_metadata(client, input_pdf: Path, output_epub: Path, console: Console, debug: bool, uploaded_file=None) -> Dict[str, Any]:
+def _extract_metadata(client, input_pdf: Path, output_epub: Path, console: Console, debug: bool, uploaded_file=None, *, stream: bool = False) -> Dict[str, Any]:
     try:
         dbg_path = output_epub.parent / f"{output_epub.stem}_metadata_raw.json"
         return get_book_metadata_verbose(
@@ -603,6 +612,7 @@ def _extract_metadata(client, input_pdf: Path, output_epub: Path, console: Conso
             str(input_pdf),
             uploaded_file=uploaded_file,
             console=console,
+            stream=stream,
             debug_path=str(dbg_path) if debug else None,
         )
     except Exception as e:  # noqa: BLE001

@@ -30,6 +30,18 @@ def _max_output_tokens() -> int:
         return 2048
 
 
+def _call_deadline_s() -> int:
+    """Per-call deadline in seconds for Gemini requests.
+
+    Controlled by env PDF2EPUB_CALL_TIMEOUT; default 240s, minimum 30s.
+    """
+    try:
+        v = int(os.environ.get("PDF2EPUB_CALL_TIMEOUT", "240"))
+        return max(30, v)
+    except Exception:
+        return 240
+
+
 def _json_cfg() -> Dict[str, Any]:
     return {"response_mime_type": "application/json", "max_output_tokens": _max_output_tokens()}
 
@@ -148,6 +160,7 @@ def get_sections_from_pdf_verbose(
     *,
     uploaded_file=None,
     console=None,
+    stream: bool = False,
     debug_path: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     """Ask Gemini to enumerate all logical sections in reading order."""
@@ -157,49 +170,216 @@ def get_sections_from_pdf_verbose(
         except Exception:
             pass
     file = uploaded_file or genai.upload_file(pdf_path, mime_type="application/pdf")
+    # Optional page count hint to improve section page range quality
+    page_count_hint = ""
+    try:
+        import importlib
+        fitz = importlib.import_module("fitz")  # type: ignore[assignment]
+        doc = fitz.open(pdf_path)
+        page_count_hint = f" There are {len(doc)} pages in total."
+        doc.close()
+    except Exception:
+        page_count_hint = ""
     instruction = (
         "Analyze this PDF and return JSON with all logical sections in reading order. "
         "Return only JSON with shape: {\"sections\": [{\"index\": integer starting at 1, \"type\": one of "
         "'title','copyright','dedication','preface','foreword','prologue','introduction','toc','chapter','appendix','acknowledgments','epilogue','afterword','notes','glossary','bibliography','index', "
         "\"title\": string, \"page_start\": integer (1-based), \"page_end\": integer (1-based, inclusive) }]}. "
         "Important: the \"title\" must preserve any numbering and labels exactly as in the document (e.g., 'Chapter 3', '1.1 Overview', '§ 2.3'). "
-        "Provide page ranges as a best-effort estimate for where each logical section occurs. Do not include full content here."
+        "Provide page ranges as a best-effort estimate for where each logical section occurs. Do not include full content here." + page_count_hint
     )
     chat = model.start_chat()
-    resp = chat.send_message([instruction, file], generation_config=_json_cfg())
-    text = _extract_text_from_response(resp).strip()
-    finish = _get_finish_reason(resp)
     sections: List[Dict[str, Any]] = []
-    try:
-        data = _parse_json_safely(text)
-        if isinstance(data, dict) and isinstance(data.get("sections"), list):
-            sections.extend([x for x in data["sections"] if isinstance(x, dict)])
-    except Exception:
-        pass
-    tries = 0
-    while finish == "MAX_TOKENS" and tries < 3:
-        tries += 1
-        cont = (
-            "Continue from the last sentence. Return only JSON with the same shape, containing only the remaining "
-            "sections (no repetition)."
-        )
-        resp = chat.send_message(cont, generation_config=_json_cfg())
-        text = _extract_text_from_response(resp).strip()
-        finish = _get_finish_reason(resp)
+    raw_texts: List[str] = []
+    meta: Dict[str, Any] = {}
+    start_ts = time.monotonic()
+    deadline = _call_deadline_s()
+
+    def _try_parse_text(txt: str) -> str:
+        txt = (txt or "").strip()
+        if txt:
+            raw_texts.append(txt)
+            try:
+                data = _parse_json_safely(txt)
+                if isinstance(data, dict) and isinstance(data.get("sections"), list):
+                    sections.extend([x for x in data["sections"] if isinstance(x, dict)])
+            except Exception:
+                pass
+        return txt
+
+    def _try_parse_from_response(resp_obj) -> str:
+        return _try_parse_text(_extract_text_from_response(resp_obj))
+
+    # Attempt 1: chat send (instruction after file)
+    text = ""
+    finish = None
+    if stream:
         try:
-            data = _parse_json_safely(text)
-            if isinstance(data, dict) and isinstance(data.get("sections"), list):
-                sections.extend([x for x in data["sections"] if isinstance(x, dict)])
-        except Exception:
-            continue
+            s = chat.send_message([instruction, file], stream=True, generation_config=_json_cfg())
+            collected: List[str] = []
+            for chunk in s:
+                # Deadline check
+                if time.monotonic() - start_ts > deadline:
+                    meta.setdefault("errors", []).append({"kind": "chat-stream", "error": "deadline_exceeded"})
+                    break
+                t = getattr(chunk, "text", None) or ""
+                if t:
+                    collected.append(t)
+                    if console:
+                        try:
+                            console.out.write(t)
+                            console.out.flush()
+                        except Exception:
+                            try:
+                                console.print(t)
+                            except Exception:
+                                pass
+            if console:
+                try:
+                    console.out.write("\n")
+                    console.out.flush()
+                except Exception:
+                    try:
+                        console.print("")
+                    except Exception:
+                        pass
+            text = ("".join(collected)).strip()
+            meta.setdefault("attempts", []).append({"kind": "chat-stream"})
+            _try_parse_text(text)
+        except Exception as e:
+            meta.setdefault("errors", []).append({"kind": "chat-stream", "error": str(e)})
+    else:
+        resp = chat.send_message([instruction, file], generation_config=_json_cfg())
+        finish = _get_finish_reason(resp)
+        meta.setdefault("attempts", []).append({"kind": "chat", "finish": finish})
+        text = _try_parse_from_response(resp)
+        tries = 0
+        prev_count = len(sections)
+        while finish == "MAX_TOKENS" and tries < 3:
+            # Deadline check
+            if time.monotonic() - start_ts > deadline:
+                meta.setdefault("errors", []).append({"kind": "chat-continue", "error": "deadline_exceeded"})
+                break
+            tries += 1
+            cont = (
+                "Continue from the last sentence. Return only JSON with the same shape, containing only the remaining "
+                "sections (no repetition)."
+            )
+            resp = chat.send_message(cont, generation_config=_json_cfg())
+            finish = _get_finish_reason(resp)
+            meta.setdefault("attempts", []).append({"kind": "chat-continue", "finish": finish})
+            _try_parse_from_response(resp)
+            # Break if no new sections were parsed (no progress)
+            if len(sections) <= prev_count:
+                break
+            prev_count = len(sections)
+
+    # Attempt 2: non-chat generate_content with [instruction, file]
+    if not sections:
+        try:
+            if stream:
+                s2 = model.generate_content([instruction, file], stream=True, generation_config=_json_cfg())
+                collected: List[str] = []
+                for chunk in s2:
+                    t = getattr(chunk, "text", None) or ""
+                    if t:
+                        collected.append(t)
+                        if console:
+                            try:
+                                console.out.write(t)
+                                console.out.flush()
+                            except Exception:
+                                try:
+                                    console.print(t)
+                                except Exception:
+                                    pass
+                if console:
+                    try:
+                        console.out.write("\n")
+                        console.out.flush()
+                    except Exception:
+                        try:
+                            console.print("")
+                        except Exception:
+                            pass
+                meta.setdefault("attempts", []).append({"kind": "gen-stream"})
+                _try_parse_text(("".join(collected)).strip())
+            else:
+                resp2 = model.generate_content([instruction, file], generation_config=_json_cfg())
+                meta.setdefault("attempts", []).append({"kind": "gen", "finish": _get_finish_reason(resp2)})
+                _try_parse_from_response(resp2)
+        except Exception as e:
+            meta.setdefault("errors", []).append({"kind": "gen", "error": str(e)})
+
+    # Attempt 3: non-chat generate_content with [file, instruction]
+    if not sections:
+        try:
+            if stream:
+                s3 = model.generate_content([file, instruction], stream=True, generation_config=_json_cfg())
+                collected = []
+                for chunk in s3:
+                    t = getattr(chunk, "text", None) or ""
+                    if t:
+                        collected.append(t)
+                        if console:
+                            try:
+                                console.out.write(t)
+                                console.out.flush()
+                            except Exception:
+                                try:
+                                    console.print(t)
+                                except Exception:
+                                    pass
+                if console:
+                    try:
+                        console.out.write("\n")
+                        console.out.flush()
+                    except Exception:
+                        try:
+                            console.print("")
+                        except Exception:
+                            pass
+                meta.setdefault("attempts", []).append({"kind": "gen-rev-stream"})
+                _try_parse_text(("".join(collected)).strip())
+            else:
+                resp3 = model.generate_content([file, instruction], generation_config=_json_cfg())
+                meta.setdefault("attempts", []).append({"kind": "gen-rev", "finish": _get_finish_reason(resp3)})
+                _try_parse_from_response(resp3)
+        except Exception as e:
+            meta.setdefault("errors", []).append({"kind": "gen-rev", "error": str(e)})
+
+    # Attempt 4: drop JSON forcing (let model reply freely and we extract braces)
+    if not sections:
+        try:
+            resp4 = model.generate_content([instruction, file])
+            meta.setdefault("attempts", []).append({"kind": "gen-free"})
+            _try_parse_from_response(resp4)
+        except Exception as e:
+            meta.setdefault("errors", []).append({"kind": "gen-free", "error": str(e)})
+
+    # Attempt 5: explicit minimal fallback ask
+    if not sections:
+        doc_stem = os.path.splitext(os.path.basename(pdf_path))[0]
+        minimal = (
+            "If you cannot confidently determine sections, return a minimal JSON now with a single section: "
+            f"{{\"sections\":[{{\"index\":1,\"type\":\"section\",\"title\":\"{doc_stem}\",\"page_start\":1,\"page_end\":1}}]}}."
+        )
+        try:
+            resp5 = model.generate_content([minimal, file], generation_config=_json_cfg())
+            meta.setdefault("attempts", []).append({"kind": "gen-min"})
+            _try_parse_from_response(resp5)
+        except Exception as e:
+            meta.setdefault("errors", []).append({"kind": "gen-min", "error": str(e)})
     if debug_path:
         try:
             from pathlib import Path
-            Path(debug_path).write_text(json.dumps({"sections": sections}, ensure_ascii=False), encoding="utf-8")
+            Path(debug_path).write_text(
+                json.dumps({"sections": sections, "raw": raw_texts, "meta": meta}, ensure_ascii=False),
+                encoding="utf-8",
+            )
         except Exception:
             pass
-    if not sections:
-        raise RuntimeError("Gemini did not return a valid sections JSON with 'sections'.")
+    # Return what we have (possibly empty); caller may fallback to a single generic section
     return sections
 
 
@@ -213,9 +393,17 @@ def get_section_content_verbose(
     section_title: str,
     page_range: Optional[tuple[int, int]] = None,
     console=None,
+    stream: bool = False,
     debug_path: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Request a single section's content as XHTML JSON with continuation on MAX_TOKENS."""
+    """Request a single section's content as XHTML JSON with continuation and fallbacks.
+
+    Enhancements:
+    - Stronger instruction to not summarize and include all text.
+    - If page_range spans many pages, split into chunks (env PDF2EPUB_PAGE_CHUNK_SIZE, default 6) and stitch.
+    - Multiple request strategies per chunk: chat, chat-continue, non-chat generate (both orderings), and free-form parse.
+    - Debug captures raw texts and attempt metadata per chunk.
+    """
     if console:
         try:
             console.log(f"Requesting section {section_index} [{section_type}]: {section_title}")
@@ -224,73 +412,333 @@ def get_section_content_verbose(
     file = uploaded_file or genai.upload_file(pdf_path, mime_type="application/pdf")
     safe_title = section_title.replace("{", "{{").replace("}", "}}")
     safe_type = (section_type or "section").strip()
-    instruction = (
+    base_instruction = (
         "Extract the specified book section from the PDF and return JSON only. "
         "JSON shape: {\"xhtml\": string, \"images\": [ {\"filename\": string, \"label\": string, \"box_2d\": [x0,y0,x1,y1], \"page_index\": integer (1-based) } ] }.\n"
         "Rules: xhtml should be a clean HTML5 fragment. Where images belong, include <figure><img src=\"images/{filename}\" alt=\"{label}\"/></figure> with the provided filename.\n"
         "Only include semantically meaningful figures (photos, diagrams, charts, illustrations).\n"
         "Explicitly DO NOT include decorative elements like borders, underlines, highlights, separators, simple rectangles/boxes around text, or page ornaments.\n"
         "Preserve the original numbering and labels in headings exactly as they appear (e.g., 'Chapter 3', '1.2.4 Methods'). Do not renumber based on the provided index.\n"
+        "Do not summarize. Include all textual content within the specified page range, preserving order of paragraphs and lists.\n"
         "box_2d coordinates MUST be normalized floats in [0,1] relative to the page (top-left origin).\n"
         f"Return only JSON. Section to extract: index={section_index}, type=\"{safe_type}\", title=\"{safe_title}\"."
     )
-    if page_range and isinstance(page_range, tuple) and len(page_range) == 2:
-        p0, p1 = page_range
+
+    # Per-call deadline guards
+    call_start = time.monotonic()
+    deadline = _call_deadline_s()
+
+    def _extract_window(p0i: Optional[int], p1i: Optional[int]) -> Dict[str, Any]:
+        instr = base_instruction
+        if p0i is not None and p1i is not None:
+            instr += f" Restrict extraction strictly to pages {p0i}..{p1i} (inclusive)."
+        xparts: List[str] = []
+        imgs: List[Dict[str, Any]] = []
+        raw: List[str] = []
+        meta: Dict[str, Any] = {}
+        chat = model.start_chat()
         try:
-            p0i = int(p0)
-            p1i = int(p1)
-            instruction += f" Restrict extraction strictly to pages {p0i}..{p1i} (inclusive)."
+            if stream:
+                s = chat.send_message([instr, file], stream=True, generation_config=_json_cfg())
+                collected: List[str] = []
+                for chunk in s:
+                    # Deadline check
+                    if time.monotonic() - call_start > deadline:
+                        meta.setdefault("errors", []).append({"kind": "chat-stream", "error": "deadline_exceeded"})
+                        break
+                    t = getattr(chunk, "text", None) or ""
+                    if t:
+                        collected.append(t)
+                        if console:
+                            try:
+                                console.out.write(t)
+                                console.out.flush()
+                            except Exception:
+                                try:
+                                    console.print(t)
+                                except Exception:
+                                    pass
+                if console:
+                    try:
+                        console.out.write("\n")
+                        console.out.flush()
+                    except Exception:
+                        try:
+                            console.print("")
+                        except Exception:
+                            pass
+                txt = ("".join(collected)).strip()
+                raw.append(txt)
+                try:
+                    d = _parse_json_safely(txt)
+                    if isinstance(d, dict):
+                        xparts.append(
+                            d.get("xhtml") or d.get("html") or d.get("content") or d.get("section_html") or ""
+                        )
+                        imgs.extend(_normalize_images(d.get("images")))
+                except Exception:
+                    pass
+                meta.setdefault("attempts", []).append({"kind": "chat-stream"})
+            else:
+                resp = chat.send_message([instr, file], generation_config=_json_cfg())
+                finish = _get_finish_reason(resp)
+                meta.setdefault("attempts", []).append({"kind": "chat", "finish": finish})
+                txt = _extract_text_from_response(resp).strip()
+                if txt:
+                    raw.append(txt)
+                    try:
+                        d = _parse_json_safely(txt)
+                        if isinstance(d, dict):
+                            xparts.append(
+                                d.get("xhtml") or d.get("html") or d.get("content") or d.get("section_html") or ""
+                            )
+                            imgs.extend(_normalize_images(d.get("images")))
+                    except Exception:
+                        pass
+                tries = 0
+                prev_len = sum(len(s or "") for s in xparts)
+                while finish == "MAX_TOKENS" and tries < 3:
+                    # Deadline check
+                    if time.monotonic() - call_start > deadline:
+                        meta.setdefault("errors", []).append({"kind": "chat-continue", "error": "deadline_exceeded"})
+                        break
+                    tries += 1
+                    cont = (
+                        "Continue from the last sentence. Return only JSON with the same shape, containing only the remaining "
+                        "content for this section (no repetition)."
+                    )
+                    resp = chat.send_message(cont, generation_config=_json_cfg())
+                    finish = _get_finish_reason(resp)
+                    meta.setdefault("attempts", []).append({"kind": "chat-continue", "finish": finish})
+                    t2 = _extract_text_from_response(resp).strip()
+                    if t2:
+                        raw.append(t2)
+                        try:
+                            d2 = _parse_json_safely(t2)
+                            if isinstance(d2, dict):
+                                xparts.append(
+                                    d2.get("xhtml") or d2.get("html") or d2.get("content") or d2.get("section_html") or ""
+                                )
+                                imgs.extend(_normalize_images(d2.get("images")))
+                        except Exception:
+                            pass
+                    # Break if no progress in XHTML length
+                    new_len = sum(len(s or "") for s in xparts)
+                    if new_len <= prev_len:
+                        break
+                    prev_len = new_len
+        except Exception as e:
+            meta.setdefault("errors", []).append({"kind": "chat", "error": str(e)})
+
+        # Non-chat fallbacks if still empty
+        if not any(xparts):
+            try:
+                if stream:
+                    s2 = model.generate_content([instr, file], stream=True, generation_config=_json_cfg())
+                    collected: List[str] = []
+                    for chunk in s2:
+                        t = getattr(chunk, "text", None) or ""
+                        if t:
+                            collected.append(t)
+                            if console:
+                                try:
+                                    console.out.write(t)
+                                    console.out.flush()
+                                except Exception:
+                                    try:
+                                        console.print(t)
+                                    except Exception:
+                                        pass
+                    if console:
+                        try:
+                            console.out.write("\n")
+                            console.out.flush()
+                        except Exception:
+                            try:
+                                console.print("")
+                            except Exception:
+                                pass
+                    meta.setdefault("attempts", []).append({"kind": "gen-stream"})
+                    t = ("".join(collected)).strip()
+                    if t:
+                        raw.append(t)
+                        try:
+                            d = _parse_json_safely(t)
+                            if isinstance(d, dict):
+                                xparts.append(d.get("xhtml") or d.get("html") or d.get("content") or d.get("section_html") or "")
+                                imgs.extend(_normalize_images(d.get("images")))
+                        except Exception:
+                            pass
+                else:
+                    resp2 = model.generate_content([instr, file], generation_config=_json_cfg())
+                    meta.setdefault("attempts", []).append({"kind": "gen", "finish": _get_finish_reason(resp2)})
+                    t = _extract_text_from_response(resp2).strip()
+                    if t:
+                        raw.append(t)
+                        try:
+                            d = _parse_json_safely(t)
+                            if isinstance(d, dict):
+                                xparts.append(d.get("xhtml") or d.get("html") or d.get("content") or d.get("section_html") or "")
+                                imgs.extend(_normalize_images(d.get("images")))
+                        except Exception:
+                            pass
+            except Exception as e:
+                meta.setdefault("errors", []).append({"kind": "gen", "error": str(e)})
+
+        if not any(xparts):
+            try:
+                if stream:
+                    s3 = model.generate_content([file, instr], stream=True, generation_config=_json_cfg())
+                    collected: List[str] = []
+                    for chunk in s3:
+                        t = getattr(chunk, "text", None) or ""
+                        if t:
+                            collected.append(t)
+                            if console:
+                                try:
+                                    console.out.write(t)
+                                    console.out.flush()
+                                except Exception:
+                                    try:
+                                        console.print(t)
+                                    except Exception:
+                                        pass
+                    if console:
+                        try:
+                            console.out.write("\n")
+                            console.out.flush()
+                        except Exception:
+                            try:
+                                console.print("")
+                            except Exception:
+                                pass
+                    meta.setdefault("attempts", []).append({"kind": "gen-rev-stream"})
+                    t = ("".join(collected)).strip()
+                    if t:
+                        raw.append(t)
+                        try:
+                            d = _parse_json_safely(t)
+                            if isinstance(d, dict):
+                                xparts.append(d.get("xhtml") or d.get("html") or d.get("content") or d.get("section_html") or "")
+                                imgs.extend(_normalize_images(d.get("images")))
+                        except Exception:
+                            pass
+                else:
+                    resp3 = model.generate_content([file, instr], generation_config=_json_cfg())
+                    meta.setdefault("attempts", []).append({"kind": "gen-rev", "finish": _get_finish_reason(resp3)})
+                    t = _extract_text_from_response(resp3).strip()
+                    if t:
+                        raw.append(t)
+                        try:
+                            d = _parse_json_safely(t)
+                            if isinstance(d, dict):
+                                xparts.append(d.get("xhtml") or d.get("html") or d.get("content") or d.get("section_html") or "")
+                                imgs.extend(_normalize_images(d.get("images")))
+                        except Exception:
+                            pass
+            except Exception as e:
+                meta.setdefault("errors", []).append({"kind": "gen-rev", "error": str(e)})
+
+        if not any(xparts):
+            try:
+                if stream:
+                    s4 = model.generate_content([instr, file], stream=True)
+                    collected: List[str] = []
+                    for chunk in s4:
+                        t = getattr(chunk, "text", None) or ""
+                        if t:
+                            collected.append(t)
+                            if console:
+                                try:
+                                    console.out.write(t)
+                                    console.out.flush()
+                                except Exception:
+                                    try:
+                                        console.print(t)
+                                    except Exception:
+                                        pass
+                    if console:
+                        try:
+                            console.out.write("\n")
+                            console.out.flush()
+                        except Exception:
+                            try:
+                                console.print("")
+                            except Exception:
+                                pass
+                    meta.setdefault("attempts", []).append({"kind": "gen-free-stream"})
+                    t = ("".join(collected)).strip()
+                    if t:
+                        raw.append(t)
+                        try:
+                            d = _parse_json_safely(t)
+                            if isinstance(d, dict):
+                                xparts.append(d.get("xhtml") or d.get("html") or d.get("content") or d.get("section_html") or "")
+                                imgs.extend(_normalize_images(d.get("images")))
+                        except Exception:
+                            pass
+                else:
+                    resp4 = model.generate_content([instr, file])
+                    meta.setdefault("attempts", []).append({"kind": "gen-free"})
+                    t = _extract_text_from_response(resp4).strip()
+                    if t:
+                        raw.append(t)
+                        try:
+                            d = _parse_json_safely(t)
+                            if isinstance(d, dict):
+                                xparts.append(d.get("xhtml") or d.get("html") or d.get("content") or d.get("section_html") or "")
+                                imgs.extend(_normalize_images(d.get("images")))
+                        except Exception:
+                            pass
+            except Exception as e:
+                meta.setdefault("errors", []).append({"kind": "gen-free", "error": str(e)})
+        return {"xhtml": "\n".join([s for s in xparts if isinstance(s, str)]), "images": imgs, "raw": raw, "meta": meta}
+
+    # Determine chunking
+    chunks: List[tuple[Optional[int], Optional[int]]] = []
+    if page_range and isinstance(page_range, tuple) and len(page_range) == 2:
+        try:
+            p0i = int(page_range[0])
+            p1i = int(page_range[1])
+            if p1i < p0i:
+                p0i, p1i = p1i, p0i
+            span = p1i - p0i + 1
+            try:
+                chunk_size = int(os.environ.get("PDF2EPUB_PAGE_CHUNK_SIZE", "6"))
+            except Exception:
+                chunk_size = 6
+            if span > chunk_size:
+                cur = p0i
+                while cur <= p1i:
+                    end = min(cur + chunk_size - 1, p1i)
+                    chunks.append((cur, end))
+                    cur = end + 1
+            else:
+                chunks.append((p0i, p1i))
         except Exception:
-            pass
-    # Chat-based loop with continuation
-    chat = model.start_chat()
-    resp = chat.send_message([instruction, file], generation_config=_json_cfg())
-    text = _extract_text_from_response(resp).strip()
-    finish = _get_finish_reason(resp)
+            chunks = [(None, None)]
+    else:
+        chunks = [(None, None)]
+
     xhtml_accum: List[str] = []
     images_accum: List[Dict[str, Any]] = []
-    try:
-        data = _parse_json_safely(text)
-        if isinstance(data, dict):
-            xhtml_accum.append(
-                data.get("xhtml")
-                or data.get("html")
-                or data.get("content")
-                or data.get("section_html")
-                or ""
-            )
-            images_accum.extend(_normalize_images(data.get("images")))
-    except Exception:
-        pass
-    # Continue if truncated
-    tries = 0
-    while finish == "MAX_TOKENS" and tries < 3:
-        tries += 1
-        cont = (
-            "Continue from the last sentence. Return only JSON with the same shape, containing only the remaining "
-            "content for this section (no repetition)."
-        )
-        resp = chat.send_message(cont, generation_config=_json_cfg())
-        text = _extract_text_from_response(resp).strip()
-        finish = _get_finish_reason(resp)
-        try:
-            data = _parse_json_safely(text)
-            if isinstance(data, dict):
-                xhtml_accum.append(
-                    data.get("xhtml")
-                    or data.get("html")
-                    or data.get("content")
-                    or data.get("section_html")
-                    or ""
-                )
-                images_accum.extend(_normalize_images(data.get("images")))
-        except Exception:
-            continue
-    xhtml = "\n".join([s for s in xhtml_accum if isinstance(s, str)])
+    debug_windows: List[Dict[str, Any]] = []
+
+    for (c0, c1) in chunks:
+        res = _extract_window(c0, c1)
+        xhtml_accum.append(res.get("xhtml", ""))
+        images_accum.extend(res.get("images", []))
+        if debug_path:
+            debug_windows.append({"range": [c0, c1], "raw": res.get("raw", []), "meta": res.get("meta", {})})
+
+    xhtml = "\n".join([s for s in xhtml_accum if isinstance(s, str) and s])
     if debug_path:
         try:
             from pathlib import Path
-            Path(debug_path).write_text(json.dumps({"xhtml": xhtml, "images": images_accum}, ensure_ascii=False), encoding="utf-8")
+            Path(debug_path).write_text(
+                json.dumps({"xhtml": xhtml, "images": images_accum, "windows": debug_windows}, ensure_ascii=False),
+                encoding="utf-8",
+            )
         except Exception:
             pass
     return {"xhtml": xhtml, "images": images_accum}
@@ -302,6 +750,7 @@ def get_book_metadata_verbose(
     *,
     uploaded_file=None,
     console=None,
+    stream: bool = False,
     debug_path: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Ask Gemini to extract bibliographic metadata."""
@@ -318,15 +767,15 @@ def get_book_metadata_verbose(
         "description (string summary); subjects (array of strings)."
     )
     text = ""
-    try:
-        stream = model.generate_content(
-            [instruction, file],
-            stream=True,
-            generation_config=_json_cfg(),
-        )
-        collected: List[str] = []
+    if stream:
         try:
-            for chunk in stream:
+            s = model.generate_content(
+                [instruction, file],
+                stream=True,
+                generation_config=_json_cfg(),
+            )
+            collected: List[str] = []
+            for chunk in s:
                 try:
                     t = getattr(chunk, "text", None) or ""
                 except Exception:
@@ -342,29 +791,22 @@ def get_book_metadata_verbose(
                                 console.print(t)
                             except Exception:
                                 pass
+            if console:
+                try:
+                    console.out.write("\n")
+                    console.out.flush()
+                except Exception:
+                    try:
+                        console.print("")
+                    except Exception:
+                        pass
+            text = ("".join(collected)).strip()
         except Exception as e:
             if console:
                 try:
                     console.log(f"Streaming failed, will retry without streaming: {e}")
                 except Exception:
                     pass
-            collected = []
-        if console:
-            try:
-                console.out.write("\n")
-                console.out.flush()
-            except Exception:
-                try:
-                    console.print("")
-                except Exception:
-                    pass
-        text = ("".join(collected)).strip()
-    except Exception as e:
-        if console:
-            try:
-                console.log(f"Stream request failed to start, will retry without streaming: {e}")
-            except Exception:
-                pass
     if not text:
         if console:
             try:
