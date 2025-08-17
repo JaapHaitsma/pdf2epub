@@ -23,6 +23,7 @@ class Args:
     debug: bool
     cover_image: Path | None
     auto_cover: bool
+    stream_console: bool
 
 
 def parse_args(argv: list[str]) -> Args:
@@ -61,6 +62,11 @@ def parse_args(argv: list[str]) -> Args:
         action="store_true",
         help="Disable using the first PDF page as a cover when no --cover-image is provided",
     )
+    parser.add_argument(
+        "--stream",
+        action="store_true",
+        help="Stream Gemini output to the console while requests are in-flight",
+    )
 
     ns = parser.parse_args(argv)
     input_pdf: Path = ns.input_pdf
@@ -76,6 +82,7 @@ def parse_args(argv: list[str]) -> Args:
     debug=bool(ns.debug),
     cover_image=ns.cover_image,
     auto_cover=not bool(ns.no_auto_cover),
+    stream_console=bool(ns.stream),
     )
 
 
@@ -105,6 +112,7 @@ def main(argv: list[str] | None = None) -> int:
             debug=args.debug,
             cover_image_path=args.cover_image,
             auto_cover=args.auto_cover,
+            stream_console=args.stream_console,
         )
     except FileNotFoundError as e:
         console.print(f"[red]File not found:[/] {e}")

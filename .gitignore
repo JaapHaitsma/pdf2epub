@@ -18,4 +18,8 @@ __pycache__/
 # debug artifacts
 *_raw.json
 
+*.pdf
+
+*.jpg
+
 .DS_Store

@@ -26,6 +26,7 @@ def convert_pdf_to_epub(
     debug: bool = False,
     cover_image_path: Optional[Path] = None,
     auto_cover: bool = True,
+    stream_console: bool = False,
 ) -> None:
     console = console or Console()
 
@@ -43,6 +44,7 @@ def convert_pdf_to_epub(
         output_epub,
         console,
         debug,
+    stream_console=stream_console,
         cover_image_path=cover_image_path,
         auto_cover=auto_cover,
     )
@@ -71,6 +73,7 @@ def _build_manifest_by_section(
     console: Console,
     debug: bool,
     *,
+    stream_console: bool = False,
     cover_image_path: Optional[Path] = None,
     auto_cover: bool = True,
 ) -> Dict[str, Any]:
@@ -82,6 +85,7 @@ def _build_manifest_by_section(
         str(input_pdf),
         console=console,
         debug_path=str(sections_debug) if debug else None,
+    stream_console=stream_console,
     )
     if not sections:
         # Fallback to a single generic section
@@ -114,6 +118,7 @@ def _build_manifest_by_section(
             section_title=title,
             console=console,
             debug_path=str(sec_debug) if debug else None,
+            stream_console=stream_console,
         )
         html_fragment: str = data.get("xhtml", "")
         # Filter decorative images before extraction and strip their references from XHTML
@@ -197,6 +202,8 @@ def _build_manifest_by_section(
 
     book_title = input_pdf.stem
     meta = _extract_metadata(client, input_pdf, output_epub, console, debug)
+    # For EPUB 2 (NCX present), omit nav.xhtml entirely; it's EPUB 3 only
+    # We'll still build it for EPUB 3 cases below if needed
     nav = _build_nav_xhtml(book_title, entries)
     nav = _soft_wrap_xhtml(nav, width=150)
     uid = meta.get("isbn") or "urn:uuid:00000000-0000-0000-0000-000000000000"
@@ -239,7 +246,8 @@ def _build_manifest_by_section(
         extra_items=image_manifest,
         cover=cover,
     )
-    files.append({"path": "OEBPS/nav.xhtml", "content": nav, "encoding": "utf-8"})
+    # Only include nav.xhtml for EPUB 3 packages (include_ncx=False). For EPUB 2, NCX is sufficient.
+    # Here we always build EPUB 2 (include_ncx=True), so skip adding nav.xhtml.
     files.append({"path": "OEBPS/toc.ncx", "content": ncx, "encoding": "utf-8"})
     files.append({"path": "OEBPS/content.opf", "content": opf, "encoding": "utf-8"})
 
@@ -249,14 +257,14 @@ def _build_manifest_by_section(
 def _wrap_xhtml(title: str, body_fragment: str) -> str:
     return (
         "<?xml version='1.0' encoding='utf-8'?>\n"
-        "<html xmlns='http://www.w3.org/1999/xhtml' xml:lang='en'>\n"
+    "<html xmlns='http://www.w3.org/1999/xhtml' xml:lang='en'>\n"
         "  <head>\n"
         f"    <title>{_escape_xml(title)}</title>\n"
-        "    <meta charset='utf-8'/>\n"
+    "    <meta http-equiv='Content-Type' content='application/xhtml+xml; charset=utf-8'/>\n"
         "    <link rel='stylesheet' type='text/css' href='styles.css'/>\n"
         "  </head>\n"
         "  <body>\n"
-        f"{body_fragment}\n"
+    f"{_sanitize_fragment_for_epub2(body_fragment)}\n"
         "  </body>\n"
         "</html>\n"
     )
@@ -269,9 +277,9 @@ def _build_nav_xhtml(book_title: str, entries: List[Dict[str, str]]) -> str:
     return (
         "<?xml version='1.0' encoding='utf-8'?>\n"
         "<html xmlns='http://www.w3.org/1999/xhtml' xmlns:epub='http://www.idpf.org/2007/ops'>\n"
-        "  <head>\n"
-        f"    <title>{_escape_xml(book_title)}</title>\n"
-        "    <meta charset='utf-8'/>\n"
+    "  <head>\n"
+    f"    <title>{_escape_xml(book_title)}</title>\n"
+    "    <meta http-equiv='Content-Type' content='application/xhtml+xml; charset=utf-8'/>\n"
         "  </head>\n"
         "  <body>\n"
         "    <nav epub:type='toc' id='toc'>\n"
@@ -332,14 +340,13 @@ def _build_content_opf(
     dc_description = (
         f"    <dc:description>{_escape_xml(meta['description'])}</dc:description>\n" if meta.get("description") else ""
     )
-    manifest_items = [
-        ("    <item id='nav' href='nav.xhtml' media-type='application/xhtml+xml'/>") if include_ncx
-        else ("    <item id='nav' href='nav.xhtml' media-type='application/xhtml+xml' properties='nav'/>")
-        ,
-        "    <item id='css' href='styles.css' media-type='text/css'/>",
-    ]
+    manifest_items: list[str] = []
     if include_ncx:
-        manifest_items.insert(0, "    <item id='ncx' href='toc.ncx' media-type='application/x-dtbncx+xml'/>")
+        manifest_items.append("    <item id='ncx' href='toc.ncx' media-type='application/x-dtbncx+xml'/>")
+    else:
+        # EPUB 3 navigation document
+        manifest_items.append("    <item id='nav' href='nav.xhtml' media-type='application/xhtml+xml' properties='nav'/>")
+    manifest_items.append("    <item id='css' href='styles.css' media-type='text/css'/>")
     # If cover present, declare cover page + image in manifest
     if cover:
         cover_page_href = _escape_xml(cover.get("page_href", "cover.xhtml"))
@@ -393,7 +400,7 @@ def _build_content_opf(
         f"{dc_date}"
         f"{dc_description}"
         f"{dc_subjects}\n"
-        "    <meta property='dcterms:modified'>1970-01-01T00:00:00Z</meta>\n"
+        f"{'    <meta property=\'dcterms:modified\'>1970-01-01T00:00:00Z</meta>\n' if pkg_version == '3.0' else ''}"
         f"{extra_meta}"
         "  </metadata>\n"
         "  <manifest>\n"
@@ -410,13 +417,13 @@ def _build_content_opf(
 def _build_cover_xhtml(img_href: str) -> str:
     return (
         "<?xml version='1.0' encoding='utf-8'?>\n"
-    "<html xmlns='http://www.w3.org/1999/xhtml' xmlns:epub='http://www.idpf.org/2007/ops' xml:lang='en' lang='en'>\n"
+        "<html xmlns='http://www.w3.org/1999/xhtml' xmlns:epub='http://www.idpf.org/2007/ops' xml:lang='en' lang='en'>\n"
         "  <head>\n"
         "    <title>Cover</title>\n"
-        "    <meta charset='utf-8'/>\n"
+        "    <meta http-equiv='Content-Type' content='application/xhtml+xml; charset=utf-8'/>\n"
     "    <meta name='viewport' content='width=device-width, initial-scale=1'/>\n"
         "    <link rel='stylesheet' type='text/css' href='styles.css'/>\n"
-        "    <style>body,html{margin:0;padding:0}.cover{display:flex;align-items:center;justify-content:center;min-height:98vh}img{max-width:100%;height:auto;display:block}</style>\n"
+        "    <style type='text/css'>body,html{margin:0;padding:0}.cover{display:flex;align-items:center;justify-content:center;min-height:98vh}img{max-width:100%;height:auto;display:block}</style>\n"
         "  </head>\n"
         "  <body>\n"
         "    <div class='cover'>\n"
@@ -425,6 +432,26 @@ def _build_cover_xhtml(img_href: str) -> str:
         "  </body>\n"
         "</html>\n"
     )
+
+def _sanitize_fragment_for_epub2(fragment: str) -> str:
+    """Replace HTML5 elements not allowed in EPUB 2 (XHTML 1.1) with safe equivalents.
+
+    - <figure> -> <div class='figure'>
+    - </figure> -> </div>
+    - <figcaption> -> <p class='figcaption'>
+    - </figcaption> -> </p>
+    """
+    if not fragment:
+        return fragment
+    try:
+        # Opening tags with any attributes
+        out = re.sub(r"<\s*figure(\s+[^>]*)?>", "<div class='figure'>", fragment, flags=re.IGNORECASE)
+        out = re.sub(r"<\s*/\s*figure\s*>", "</div>", out, flags=re.IGNORECASE)
+        out = re.sub(r"<\s*figcaption(\s+[^>]*)?>", "<p class='figcaption'>", out, flags=re.IGNORECASE)
+        out = re.sub(r"<\s*/\s*figcaption\s*>", "</p>", out, flags=re.IGNORECASE)
+        return out
+    except Exception:
+        return fragment
 
 
 def _prepare_cover(

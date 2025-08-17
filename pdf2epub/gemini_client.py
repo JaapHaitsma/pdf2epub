@@ -40,6 +40,7 @@ def get_sections_from_pdf_verbose(
     *,
     console=None,
     debug_path: Optional[str] = None,
+    stream_console: bool = False,
 ) -> List[Dict[str, Any]]:
     """Ask Gemini to enumerate all logical sections in reading order."""
     if console:
@@ -72,7 +73,7 @@ def get_sections_from_pdf_verbose(
                     t = ""
                 if t:
                     collected.append(t)
-                    if console:
+                    if console and stream_console:
                         try:
                             console.out.write(t)
                             console.out.flush()
@@ -82,14 +83,14 @@ def get_sections_from_pdf_verbose(
                             except Exception:
                                 pass
         except Exception as e:  # streaming failed mid-way
-            if console:
+            if console and stream_console:
                 try:
                     console.log(f"Streaming failed, will retry without streaming: {e}")
                 except Exception:
                     pass
             collected = []
         # best-effort newline after streaming
-        if console:
+        if console and stream_console:
             try:
                 console.out.write("\n")
                 console.out.flush()
@@ -100,13 +101,13 @@ def get_sections_from_pdf_verbose(
                     pass
         text = ("".join(collected)).strip()
     except Exception as e:
-        if console:
+        if console and stream_console:
             try:
                 console.log(f"Stream request failed to start, will retry without streaming: {e}")
             except Exception:
                 pass
     if not text:
-        if console:
+        if console and stream_console:
             try:
                 console.log("Retrying sections request without streaming (with backoff)…")
             except Exception:
@@ -148,6 +149,7 @@ def get_section_content_verbose(
     section_title: str,
     console=None,
     debug_path: Optional[str] = None,
+    stream_console: bool = False,
 ) -> Dict[str, Any]:
     """Request a single section's content as XHTML JSON."""
     if console:
@@ -180,7 +182,7 @@ def get_section_content_verbose(
             stream=True,
             generation_config={"response_mime_type": "application/json"},
         )
-        if console:
+        if console and stream_console:
             try:
                 console.log("Streaming section content from Gemini…")
             except Exception:
@@ -194,7 +196,7 @@ def get_section_content_verbose(
                     t = ""
                 if t:
                     collected.append(t)
-                    if console:
+                    if console and stream_console:
                         try:
                             console.out.write(t)
                             console.out.flush()
@@ -204,13 +206,13 @@ def get_section_content_verbose(
                             except Exception:
                                 pass
         except Exception as e:
-            if console:
+            if console and stream_console:
                 try:
                     console.log(f"Streaming failed, will retry without streaming: {e}")
                 except Exception:
                     pass
             collected = []
-        if console:
+        if console and stream_console:
             try:
                 console.out.write("\n")
                 console.out.flush()
@@ -221,13 +223,13 @@ def get_section_content_verbose(
                     pass
         text = ("".join(collected)).strip()
     except Exception as e:
-        if console:
+        if console and stream_console:
             try:
                 console.log(f"Stream request failed to start, will retry without streaming: {e}")
             except Exception:
                 pass
     if not text:
-        if console:
+        if console and stream_console:
             try:
                 console.log("Retrying section request without streaming (with backoff)…")
             except Exception:
@@ -308,6 +310,7 @@ def get_book_metadata_verbose(
     *,
     console=None,
     debug_path: Optional[str] = None,
+    stream_console: bool = False,
 ) -> Dict[str, Any]:
     """Ask Gemini to extract bibliographic metadata."""
     if console:
@@ -338,7 +341,7 @@ def get_book_metadata_verbose(
                     t = ""
                 if t:
                     collected.append(t)
-                    if console:
+                    if console and stream_console:
                         try:
                             console.out.write(t)
                             console.out.flush()
@@ -348,13 +351,13 @@ def get_book_metadata_verbose(
                             except Exception:
                                 pass
         except Exception as e:
-            if console:
+            if console and stream_console:
                 try:
                     console.log(f"Streaming failed, will retry without streaming: {e}")
                 except Exception:
                     pass
             collected = []
-        if console:
+        if console and stream_console:
             try:
                 console.out.write("\n")
                 console.out.flush()
@@ -365,13 +368,13 @@ def get_book_metadata_verbose(
                     pass
         text = ("".join(collected)).strip()
     except Exception as e:
-        if console:
+        if console and stream_console:
             try:
                 console.log(f"Stream request failed to start, will retry without streaming: {e}")
             except Exception:
                 pass
     if not text:
-        if console:
+        if console and stream_console:
             try:
                 console.log("Retrying metadata request without streaming (with backoff)…")
             except Exception:
