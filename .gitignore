@@ -11,4 +11,11 @@ __pycache__/
 
 # build artifacts
 *.epub
-test_epub*/
+
+# test artifacts
+*_epub*/
+
+# debug artifacts
+*_raw.json
+
+.DS_Store

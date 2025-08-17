@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import re
 from typing import Any, Dict, List, Optional
 
 from rich.console import Console
@@ -80,6 +81,9 @@ def _build_manifest_by_section(
 
     # Track how many times we've seen a given base name to avoid duplicates
     used_counts: Dict[str, int] = {}
+    used_image_names: Dict[str, int] = {}
+    image_files: List[Dict[str, Any]] = []
+    image_manifest: List[Dict[str, str]] = []  # {id, href, media}
     for sec in sections:
         idx = int(sec.get("index", len(entries) + 1))
         sec_type = str(sec.get("type", "section")).lower()
@@ -95,19 +99,95 @@ def _build_manifest_by_section(
             debug_path=str(sec_debug) if debug else None,
         )
         html_fragment: str = data.get("xhtml", "")
+        # Filter decorative images before extraction and strip their references from XHTML
+        imgs_raw = data.get("images") if isinstance(data, dict) else None
+        filtered_imgs: List[Dict[str, Any]] = []
+        skip_names: set[str] = set()
+        if isinstance(imgs_raw, list) and imgs_raw:
+            for it in imgs_raw:
+                if not isinstance(it, dict):
+                    continue
+                box = it.get("box_2d")
+                if not isinstance(box, list) or len(box) != 4:
+                    continue
+                try:
+                    x0, y0, x1, y1 = [float(v) for v in box]
+                except Exception:
+                    continue
+                # compute normalized geometry features
+                w = max(0.0, min(1.0, x1) - max(0.0, min(1.0, x0)))
+                h = max(0.0, min(1.0, y1) - max(0.0, min(1.0, y0)))
+                area = w * h
+                ar = (w / h) if h > 1e-6 else float("inf")
+                # Heuristics for decorative boxes around text or separators:
+                # - extremely thin bands (likely lines/highlights)
+                # - very large thin frames (page borders)
+                # - near-full-width thin strips (separators)
+                is_thin = (w < 0.02) or (h < 0.02)
+                very_thin = (w < 0.01) or (h < 0.01)
+                near_full_w = w > 0.95
+                near_full_h = h > 0.95
+                long_skinny = (ar > 10) or (ar < 0.1)
+                page_border_like = (area > 0.6 and (very_thin or long_skinny))
+                separator_like = (near_full_w and h < 0.02) or (near_full_h and w < 0.02)
+                decorative = (very_thin or separator_like or page_border_like)
+                if decorative:
+                    name = str(it.get("filename", ""))
+                    if name:
+                        skip_names.add(name)
+                    continue
+                filtered_imgs.append(it)
+        # Remove references in XHTML to skipped images to avoid broken links
+        if skip_names:
+            for nm in skip_names:
+                # Remove entire <img ...> tag that references the skipped image
+                pattern_dq = rf"<img\b[^>]*?\bsrc\s*=\s*\"images/{re.escape(nm)}\"[^>]*?/?>"
+                pattern_sq = rf"<img\b[^>]*?\bsrc\s*=\s*'images/{re.escape(nm)}'[^>]*?/?>"
+                html_fragment = re.sub(pattern_dq, "", html_fragment, flags=re.IGNORECASE)
+                html_fragment = re.sub(pattern_sq, "", html_fragment, flags=re.IGNORECASE)
+        # Ensure the fragment contains a top heading with the exact title (keeping numbering)
+        html_fragment = _ensure_title_heading(title, html_fragment)
         xhtml = _wrap_xhtml(title, html_fragment)
+        xhtml = _soft_wrap_xhtml(xhtml, width=150)
         base = _basename_from_title_or_type(title, sec_type, idx, used_counts)
         rel_href = f"{base}.xhtml"
         file_path = f"OEBPS/{rel_href}"
         files.append({"path": file_path, "content": xhtml, "encoding": "utf-8"})
         entries.append({"id": f"sec{idx:02}", "href": rel_href, "title": title, "type": sec_type})
 
+        # Handle optional images from Gemini
+        try:
+            imgs = filtered_imgs
+            if isinstance(imgs, list) and imgs:
+                added = _extract_and_register_images(
+                    input_pdf,
+                    imgs,
+                    used_image_names,
+                    image_files,
+                    image_manifest,
+                    console,
+                )
+                if added and console:
+                    try:
+                        console.log(f"Added {added} image(s) for section {idx}")
+                    except Exception:
+                        pass
+        except Exception as e:
+            try:
+                console.log(f"Failed to process images for section {idx}: {e}")
+            except Exception:
+                pass
+
     book_title = input_pdf.stem
     meta = _extract_metadata(client, input_pdf, output_epub, console, debug)
     nav = _build_nav_xhtml(book_title, entries)
+    nav = _soft_wrap_xhtml(nav, width=150)
     uid = meta.get("isbn") or "urn:uuid:00000000-0000-0000-0000-000000000000"
     ncx = _build_toc_ncx(uid, book_title, entries)
-    opf = _build_content_opf(book_title, entries, meta, include_ncx=True)
+    # Merge image_files into files and declare in OPF
+    for img in image_files:
+        files.append(img)
+    opf = _build_content_opf(book_title, entries, meta, include_ncx=True, extra_items=image_manifest)
     files.append({"path": "OEBPS/nav.xhtml", "content": nav, "encoding": "utf-8"})
     files.append({"path": "OEBPS/toc.ncx", "content": ncx, "encoding": "utf-8"})
     files.append({"path": "OEBPS/content.opf", "content": opf, "encoding": "utf-8"})
@@ -154,8 +234,26 @@ def _build_nav_xhtml(book_title: str, entries: List[Dict[str, str]]) -> str:
     )
 
 
-def _build_content_opf(book_title: str, entries: List[Dict[str, str]], meta: Dict[str, Any] | None = None, include_ncx: bool = False) -> str:
+def _ensure_title_heading(title: str, fragment: str) -> str:
+    """Ensure the fragment begins with a heading containing the exact title.
+
+    - If an <h1> or <h2> already contains the title text (case-insensitive, trimmed), keep as-is.
+    - Otherwise, insert an <h1>{title}</h1> at the top.
+    """
+    t = (title or "").strip()
+    if not t:
+        return fragment
+    # Quick check for an existing heading with the title
+    pat = re.compile(r"<(h1|h2)[^>]*>\s*" + re.escape(t) + r"\s*</\1>", re.IGNORECASE)
+    if pat.search(fragment):
+        return fragment
+    # Otherwise, prepend an h1
+    return f"<h1>{_escape_xml(t)}</h1>\n" + (fragment or "")
+
+
+def _build_content_opf(book_title: str, entries: List[Dict[str, str]], meta: Dict[str, Any] | None = None, include_ncx: bool = False, extra_items: List[Dict[str, str]] | None = None) -> str:
     meta = meta or {}
+    extra_items = extra_items or []
     dc_creators = "\n".join(
         f"    <dc:creator>{_escape_xml(a)}</dc:creator>" for a in meta.get("authors", [])
     )
@@ -192,6 +290,13 @@ def _build_content_opf(book_title: str, entries: List[Dict[str, str]], meta: Dic
             f"    <item id='{chap_id}' href='{_escape_xml(href)}' media-type='application/xhtml+xml'/>"
         )
         spine_items.append(f"    <itemref idref='{chap_id}'/>")
+    # Include supplied extra items (e.g., images)
+    for it in extra_items:
+        iid = _escape_xml(it.get("id", ""))
+        href = _escape_xml(it.get("href", ""))
+        media = _escape_xml(it.get("media", "application/octet-stream"))
+        if iid and href:
+            manifest_items.append(f"    <item id='{iid}' href='{href}' media-type='{media}'/>")
     manifest_xml = "\n".join(manifest_items)
     spine_xml = "\n".join(spine_items)
     pkg_version = "2.0" if include_ncx else "3.0"
@@ -218,6 +323,46 @@ def _build_content_opf(book_title: str, entries: List[Dict[str, str]], meta: Dic
         "  </spine>\n"
         "</package>\n"
     )
+
+
+def _soft_wrap_xhtml(xhtml: str, width: int = 150) -> str:
+    """Soft-wrap lines to a maximum width, avoiding wrapping inside <pre> and <code> blocks.
+
+    We only break on whitespace, preserving tag and attribute integrity.
+    """
+    import textwrap
+
+    lines = xhtml.splitlines()
+    out: list[str] = []
+    in_pre = False
+    in_code = False
+    for line in lines:
+        # Determine wrapping eligibility for this line
+        wrap_allowed = not in_pre and not in_code and ("<pre" not in line) and ("<code" not in line)
+        if wrap_allowed and len(line) > width:
+            # Use break_long_words=False to avoid breaking tags/attributes
+            wrapped = textwrap.fill(
+                line,
+                width=width,
+                break_long_words=False,
+                break_on_hyphens=False,
+                replace_whitespace=False,
+            )
+            out.append(wrapped)
+        else:
+            out.append(line)
+        # Update state after processing this line
+        # Entering blocks
+        if "<pre" in line:
+            in_pre = True
+        if "<code" in line:
+            in_code = True
+        # Exiting blocks
+        if "</pre>" in line:
+            in_pre = False
+        if "</code>" in line:
+            in_code = False
+    return "\n".join(out)
 
 
 def _build_toc_ncx(uid: str, book_title: str, entries: List[Dict[str, str]]) -> str:
@@ -312,3 +457,124 @@ def _basename_from_title_or_type(title: str, sec_type: str, idx: int, used_count
         return base
     # First duplicate gets -01, then -02, ...
     return f"{base}-{count - 1:02}"
+
+
+def _sanitize_filename(name: str, default_ext: str = ".png") -> str:
+    name = name.strip().replace("\\", "/").split("/")[-1]
+    # keep only safe chars
+    safe = re.sub(r"[^a-zA-Z0-9._-]", "-", name)
+    if not safe:
+        safe = "image"
+    # ensure extension
+    if "." not in safe.split("-")[-1]:
+        safe += default_ext
+    # normalize extension
+    root, dot, ext = safe.rpartition(".")
+    ext = ext.lower()
+    if ext not in ("png", "jpg", "jpeg"):
+        ext = "png"
+    safe = (root if root else "image") + "." + ext
+    return safe
+
+
+def _ensure_unique_image_name(name: str, used: Dict[str, int]) -> str:
+    base, dot, ext = name.rpartition(".")
+    if not base:
+        base = "image"
+        ext = ext or "png"
+    key = f"{base}.{ext}"
+    count = used.get(key, 0)
+    if count == 0:
+        used[key] = 1
+        return key
+    count += 1
+    used[key] = count
+    return f"{base}-{count:02}.{ext}"
+
+
+def _extract_and_register_images(
+    pdf_path: Path,
+    items: List[Dict[str, Any]],
+    used_names: Dict[str, int],
+    out_files: List[Dict[str, Any]],
+    out_manifest: List[Dict[str, str]],
+    console: Console | None,
+) -> int:
+    try:
+        import importlib
+        fitz = importlib.import_module("fitz")  # type: ignore[assignment]
+    except Exception:
+        if console:
+            try:
+                console.log("PyMuPDF not available; skipping image extraction.")
+            except Exception:
+                pass
+        return 0
+    if not pdf_path.exists():
+        return 0
+    doc = fitz.open(str(pdf_path))
+    added = 0
+    for it in items:
+        filename = _sanitize_filename(str(it.get("filename", "")))
+        page_index = it.get("page_index")
+        box = it.get("box_2d")
+        label = str(it.get("label", ""))
+        if not isinstance(page_index, int) or not isinstance(box, list) or len(box) != 4:
+            continue
+        pidx = page_index - 1
+        if pidx < 0 or pidx >= len(doc):
+            continue
+        try:
+            page = doc[pidx]
+            rect = page.rect
+            x0, y0, x1, y1 = [float(v) for v in box]
+            # Normalize: accept [0..1], [0..1000], [0..10000], or absolute page points
+            maxv = max(abs(x0), abs(y0), abs(x1), abs(y1))
+            if maxv <= 1.01:
+                nx0, ny0, nx1, ny1 = x0, y0, x1, y1
+            elif maxv <= 1000.0 + 1e-6:
+                nx0, ny0, nx1, ny1 = x0 / 1000.0, y0 / 1000.0, x1 / 1000.0, y1 / 1000.0
+            elif maxv <= 10000.0 + 1e-6:
+                nx0, ny0, nx1, ny1 = x0 / 10000.0, y0 / 10000.0, x1 / 10000.0, y1 / 10000.0
+            else:
+                # Assume page coordinate space (points); convert to normalized
+                w = rect.width if rect.width else 1.0
+                h = rect.height if rect.height else 1.0
+                nx0, ny0, nx1, ny1 = x0 / w, y0 / h, x1 / w, y1 / h
+            # clamp/order
+            nx0, nx1 = sorted((max(0.0, min(1.0, nx0)), max(0.0, min(1.0, nx1))))
+            ny0, ny1 = sorted((max(0.0, min(1.0, ny0)), max(0.0, min(1.0, ny1))))
+            ax0 = rect.x0 + (rect.width * nx0)
+            ay0 = rect.y0 + (rect.height * ny0)
+            ax1 = rect.x0 + (rect.width * nx1)
+            ay1 = rect.y0 + (rect.height * ny1)
+            clip = fitz.Rect(ax0, ay0, ax1, ay1)
+            # upscale a bit to improve quality
+            mat = fitz.Matrix(2, 2)
+            pix = page.get_pixmap(clip=clip, matrix=mat, alpha=False)
+            # choose encoding by extension
+            _, _, ext = filename.rpartition(".")
+            ext = ext.lower()
+            if ext == "jpg" or ext == "jpeg":
+                data = pix.tobytes("jpeg")
+                media = "image/jpeg"
+            else:
+                data = pix.tobytes("png")
+                media = "image/png"
+            unique = _ensure_unique_image_name(filename, used_names)
+            rel = f"images/{unique}"
+            out_files.append({
+                "path": f"OEBPS/{rel}",
+                "content": data,
+                "encoding": None,
+            })
+            out_manifest.append({
+                "id": f"img-{re.sub(r'[^a-zA-Z0-9_-]', '-', unique.rsplit('.',1)[0])}",
+                "href": rel,
+                "media": media,
+            })
+            added += 1
+        except Exception:
+            continue
+    doc.close()
+    return added

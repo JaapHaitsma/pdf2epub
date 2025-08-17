@@ -9,7 +9,9 @@ SYSTEM_PROMPT = (
     "You are a helpful editor. Clean and structure book-like text into chapters and sections. "
     "Preserve lists, code blocks, and headings. Output MUST be valid HTML5 fragment(s), "
     "using <h1> for title, <h2>/<h3> for sections, <p> for paragraphs, <ul>/<ol>/<li> for lists, "
-    "and <pre><code> for code. Do not include images or <img> tags; summarize figure captions as plain text if needed."
+    "and <pre><code> for code. Always preserve numbering prefixes and labels as they appear in the document "
+    "(e.g., 'Chapter 3', '1.2.4', '§ 2.3'). When a prompt explicitly requests images, include them as instructed; "
+    "otherwise do not add images."
 )
 
 
@@ -50,7 +52,8 @@ def get_sections_from_pdf_verbose(
         "Analyze this PDF and return JSON with all logical sections in reading order. "
         "Return only JSON with shape: {\"sections\": [{\"index\": integer starting at 1, \"type\": one of "
         "'title','copyright','dedication','preface','foreword','prologue','introduction','toc','chapter','appendix','acknowledgments','epilogue','afterword','notes','glossary','bibliography','index', \"title\": string}]}. "
-        "Focus on logical structure, not pages. Do not include full content here."
+        "Important: the \"title\" must preserve any numbering and labels exactly as in the document (e.g., 'Chapter 3', '1.1 Overview', '§ 2.3'). "
+        "Do not invent, drop, or renumber headings. Focus on logical structure, not pages. Do not include full content here."
     )
     text = ""
     # Try streaming first; if it throws (e.g., 504), fall back to non-streaming with retries
@@ -162,9 +165,12 @@ def get_section_content_verbose(
     safe_type = (section_type or "section").strip()
     instruction = (
         "Extract the specified book section from the PDF and return JSON only. "
-        "The JSON object must include: \n"
-        '- "xhtml": a complete HTML5 fragment for this section (no scripts). \n'
-        "Do not include images or <img> tags; summarize any figure captions in text. \n"
+        "JSON shape: {\"xhtml\": string, \"images\": [ {\"filename\": string, \"label\": string, \"box_2d\": [x0,y0,x1,y1], \"page_index\": integer (1-based) } ] }.\n"
+        "Rules: xhtml should be a clean HTML5 fragment. Where images belong, include <figure><img src=\"images/{filename}\" alt=\"{label}\"/></figure> with the provided filename.\n"
+        "Only include semantically meaningful figures (photos, diagrams, charts, illustrations).\n"
+        "Explicitly DO NOT include decorative elements like borders, underlines, highlights, separators, simple rectangles/boxes around text, or page ornaments.\n"
+        "Preserve the original numbering and labels in headings exactly as they appear (e.g., 'Chapter 3', '1.2.4 Methods'). Do not renumber based on the provided index.\n"
+        "box_2d coordinates MUST be normalized floats in [0,1] relative to the page (top-left origin).\n"
         f"Return only JSON. Section to extract: index={section_index}, type=\"{safe_type}\", title=\"{safe_title}\"."
     )
     text = ""
@@ -257,7 +263,43 @@ def get_section_content_verbose(
         or data.get("section_html")
         or ""
     )
-    return {"xhtml": xhtml}
+    images = data.get("images")
+    if not isinstance(images, list):
+        images = []
+    # Normalize image items
+    norm_images: List[Dict[str, Any]] = []
+    for it in images:
+        if not isinstance(it, dict):
+            continue
+        filename = it.get("filename") or it.get("file") or it.get("name")
+        label = it.get("label") or it.get("alt") or ""
+        box = it.get("box_2d") or it.get("bbox") or it.get("box")
+        page_index = it.get("page_index") or it.get("page") or it.get("pageNumber")
+        if not filename or not isinstance(filename, str):
+            continue
+        if not isinstance(box, (list, tuple)) or len(box) != 4:
+            continue
+        try:
+            x0, y0, x1, y1 = [float(v) for v in box]
+        except Exception:
+            continue
+        # clamp to [0,1]
+        def _clamp(v: float) -> float:
+            return 0.0 if v < 0 else (1.0 if v > 1 else v)
+        x0, y0, x1, y1 = _clamp(x0), _clamp(y0), _clamp(x1), _clamp(y1)
+        if page_index is None:
+            continue
+        try:
+            page_index = int(page_index)
+        except Exception:
+            continue
+        norm_images.append({
+            "filename": filename,
+            "label": label,
+            "box_2d": [x0, y0, x1, y1],
+            "page_index": page_index,
+        })
+    return {"xhtml": xhtml, "images": norm_images}
 
 
 def get_book_metadata_verbose(

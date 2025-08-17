@@ -15,6 +15,7 @@ dependencies = [
   "ebooklib>=0.18",
   "python-dotenv>=1.0",
   "rich>=13.7",
+  "pymupdf>=1.26.3",
 ]
 
 [project.scripts]
