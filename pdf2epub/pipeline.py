@@ -22,6 +22,7 @@ def convert_pdf_to_epub(
     keep_sources: bool = False,
     console: Optional[Console] = None,
     by_section: bool = False,
+    debug: bool = False,
 ) -> None:
     console = console or Console()
 
@@ -33,7 +34,7 @@ def convert_pdf_to_epub(
 
     # Only section-by-section mode is supported
     console.log("Using section-by-section mode…")
-    manifest = _build_manifest_by_section(client, input_pdf, output_epub, console)
+    manifest = _build_manifest_by_section(client, input_pdf, output_epub, console, debug)
     temp_dir = output_epub.parent / (output_epub.stem + "_epub_src")
     if temp_dir.exists():
         # Best-effort clean
@@ -53,13 +54,16 @@ def convert_pdf_to_epub(
 
 
 def _build_manifest_by_section(
-    client, input_pdf: Path, output_epub: Path, console: Console
+    client, input_pdf: Path, output_epub: Path, console: Console, debug: bool
 ) -> Dict[str, Any]:
     stem = output_epub.stem
     # 1) Get sections
     sections_debug = output_epub.parent / f"{stem}_sections_raw.json"
     sections = get_sections_from_pdf_verbose(
-        client, str(input_pdf), console=console, debug_path=str(sections_debug)
+        client,
+        str(input_pdf),
+        console=console,
+        debug_path=str(sections_debug) if debug else None,
     )
     if not sections:
         # Fallback to a single generic section
@@ -88,18 +92,18 @@ def _build_manifest_by_section(
             section_type=sec_type,
             section_title=title,
             console=console,
-            debug_path=str(sec_debug),
+            debug_path=str(sec_debug) if debug else None,
         )
-    html_fragment: str = data.get("xhtml", "")
-    xhtml = _wrap_xhtml(title, html_fragment)
-    base = _basename_from_title_or_type(title, sec_type, idx, used_counts)
-    rel_href = f"{base}.xhtml"
-    file_path = f"OEBPS/{rel_href}"
-    files.append({"path": file_path, "content": xhtml, "encoding": "utf-8"})
-    entries.append({"id": f"sec{idx:02}", "href": rel_href, "title": title, "type": sec_type})
+        html_fragment: str = data.get("xhtml", "")
+        xhtml = _wrap_xhtml(title, html_fragment)
+        base = _basename_from_title_or_type(title, sec_type, idx, used_counts)
+        rel_href = f"{base}.xhtml"
+        file_path = f"OEBPS/{rel_href}"
+        files.append({"path": file_path, "content": xhtml, "encoding": "utf-8"})
+        entries.append({"id": f"sec{idx:02}", "href": rel_href, "title": title, "type": sec_type})
 
     book_title = input_pdf.stem
-    meta = _extract_metadata(client, input_pdf, output_epub, console)
+    meta = _extract_metadata(client, input_pdf, output_epub, console, debug)
     nav = _build_nav_xhtml(book_title, entries)
     uid = meta.get("isbn") or "urn:uuid:00000000-0000-0000-0000-000000000000"
     ncx = _build_toc_ncx(uid, book_title, entries)
@@ -245,10 +249,15 @@ def _build_toc_ncx(uid: str, book_title: str, entries: List[Dict[str, str]]) -> 
     )
 
 
-def _extract_metadata(client, input_pdf: Path, output_epub: Path, console: Console) -> Dict[str, Any]:
+def _extract_metadata(client, input_pdf: Path, output_epub: Path, console: Console, debug: bool) -> Dict[str, Any]:
     try:
-        debug = output_epub.parent / f"{output_epub.stem}_metadata_raw.json"
-        return get_book_metadata_verbose(client, str(input_pdf), console=console, debug_path=str(debug))
+        dbg_path = output_epub.parent / f"{output_epub.stem}_metadata_raw.json"
+        return get_book_metadata_verbose(
+            client,
+            str(input_pdf),
+            console=console,
+            debug_path=str(dbg_path) if debug else None,
+        )
     except Exception as e:  # noqa: BLE001
         try:
             console.log(f"Metadata extraction failed, continuing without: {e}")

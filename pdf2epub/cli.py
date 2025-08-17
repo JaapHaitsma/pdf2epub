@@ -21,6 +21,7 @@ class Args:
     output_epub: Path
     keep_sources: bool
     by_section: bool
+    debug: bool
 
 
 def parse_args(argv: list[str]) -> Args:
@@ -49,6 +50,11 @@ def parse_args(argv: list[str]) -> Args:
         default=True,
         help="Extract the book section-by-section (default and only mode)",
     )
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="Write raw Gemini JSON responses (sections, section content, metadata) next to the output",
+    )
 
     ns = parser.parse_args(argv)
     input_pdf: Path = ns.input_pdf
@@ -62,6 +68,7 @@ def parse_args(argv: list[str]) -> Args:
         output_epub=output_epub,
         keep_sources=ns.keep_sources,
         by_section=True,  # only supported mode
+    debug=bool(ns.debug),
     )
 
 
@@ -89,6 +96,7 @@ def main(argv: list[str] | None = None) -> int:
             keep_sources=args.keep_sources,
             console=console,
             by_section=True,
+            debug=args.debug,
         )
     except FileNotFoundError as e:
         console.print(f"[red]File not found:[/] {e}")
