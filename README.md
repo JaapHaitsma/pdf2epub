@@ -1,10 +1,12 @@
-# pdf2epub (uv project)
+# pdf2epub
 
 Convert a PDF to an EPUB using Google Gemini (2.5 Pro) with a simple, resilient CLI.
+This project has been vibe coded with Github copilot with GPT-5 (previe)
 
 ## Highlights
 
--   Section-by-section conversion only (stable default). Titles and numbering (e.g., “Chapter 3”, “1.2.4”) are preserved in XHTML and TOC.
+-   Conversion is done Section by Section (TOC, Introduction, Chapter 1, Chapter 2, etc).
+-   Titles and numbering (e.g., “Chapter 3”, “1.2.4”) are preserved in XHTML and TOC.
 -   Image detection via Gemini + cropping via PyMuPDF; embeds images under `OEBPS/images/` and rewrites `<img>` refs.
 -   Skips decorative boxes/lines around text using geometry heuristics (no borders/highlights/separators).
 -   Optional cover image support:
@@ -56,6 +58,49 @@ uv run pdf2epub book.pdf -o book.epub --cover-image cover.jpg
 
 # Keep sources for inspection and write debug JSON
 uv run pdf2epub book.pdf -o book.epub --keep-sources --debug
+```
+
+## Makefile shortcuts
+
+The Makefile provides convenient targets and variables to speed up common tasks.
+
+-   Variables (override on the command line):
+
+    -   IN: input PDF path. Default: `book.pdf`
+    -   OUT: output EPUB filename. Default: `$(basename $(notdir $(IN))).epub`
+    -   SRC_DIR: source folder name for unpacked EPUB. Default: `$(basename $(notdir $(IN)))_epub_src`
+
+-   Targets:
+    -   setup: Install dependencies via `uv sync`.
+    -   run: Run the converter with useful flags:
+        -   `pdf2epub $(IN) -o $(OUT) --keep-sources --debug --stream --cover-image cover.jpg`
+        -   Note: expects a `cover.jpg` in the project root; change or remove this flag in the Makefile if not desired.
+    -   lint: Lint with Ruff.
+    -   fix: Lint and auto-fix with Ruff.
+    -   test: Run the test suite with pytest.
+    -   epub-from-src: Zip an EPUB from `$(SRC_DIR)` (useful after manual edits to unpacked EPUB files).
+    -   epubcheck: Validate `$(OUT)` with epubcheck (requires epubcheck installed; on macOS: `brew install epubcheck`).
+    -   open: Open `$(OUT)` in Apple Books (macOS).
+    -   clean: Remove `$(OUT)`.
+
+Examples:
+
+```sh
+# Install deps
+make setup
+
+# Convert with defaults (book.pdf -> book.epub)
+make run
+
+# Convert a specific file and choose output name
+make run IN=manuscript.pdf OUT=mybook.epub
+
+# Validate and open the result
+make epubcheck
+make open
+
+# Rebuild an EPUB from an existing unpacked source directory
+make epub-from-src SRC_DIR=mybook_epub_src OUT=mybook.epub
 ```
 
 ## How it works

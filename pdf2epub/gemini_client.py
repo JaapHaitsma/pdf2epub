@@ -1,4 +1,5 @@
 import time
+import re
 from typing import Any, Dict, Iterable, List, Optional
 
 import google.generativeai as genai
@@ -18,6 +19,20 @@ def init_client(api_key: str, model: str) -> genai.GenerativeModel:
     return genai.GenerativeModel(model_name=model, system_instruction=SYSTEM_PROMPT)
 
 
+def upload_pdf_once(pdf_path: str, *, console=None) -> Any:
+    """Upload the PDF once and return the uploaded file handle.
+
+    The returned object can be reused in multiple model.generate_content calls
+    within this process, avoiding repeated uploads.
+    """
+    if console:
+        try:
+            console.log(f"Uploading PDF once: {pdf_path}")
+        except Exception:
+            pass
+    return genai.upload_file(pdf_path, mime_type="application/pdf")
+
+
 def generate_structured_html(model: genai.GenerativeModel, chunks: Iterable[str]) -> list[str]:
     html_parts: list[str] = []
     for chunk in chunks:
@@ -34,8 +49,9 @@ def generate_structured_html(model: genai.GenerativeModel, chunks: Iterable[str]
 
 def get_sections_from_pdf_verbose(
     model: genai.GenerativeModel,
-    pdf_path: str,
+    pdf_path: Optional[str] = None,
     *,
+    uploaded_file: Any | None = None,
     console=None,
     debug_path: Optional[str] = None,
     stream_console: bool = False,
@@ -46,7 +62,11 @@ def get_sections_from_pdf_verbose(
             console.log("Requesting sections (front matter, chapters, back matter) from Gemini…")
         except Exception:
             pass
-    file = genai.upload_file(pdf_path, mime_type="application/pdf")
+    file = uploaded_file or (
+        genai.upload_file(pdf_path, mime_type="application/pdf") if pdf_path else None
+    )
+    if file is None:
+        raise ValueError("No uploaded_file provided and no pdf_path to upload from.")
     instruction = (
         "Analyze this PDF and return JSON with all logical sections in reading order. "
         "Return only JSON with shape: {\"sections\": [{\"index\": integer starting at 1, \"type\": one of "
@@ -140,8 +160,9 @@ def get_sections_from_pdf_verbose(
 
 def get_section_content_verbose(
     model: genai.GenerativeModel,
-    pdf_path: str,
+    pdf_path: Optional[str] = None,
     *,
+    uploaded_file: Any | None = None,
     section_index: int,
     section_type: str,
     section_title: str,
@@ -155,12 +176,11 @@ def get_section_content_verbose(
             console.log(f"Requesting section {section_index} [{section_type}]: {section_title}")
         except Exception:
             pass
-    file = genai.upload_file(pdf_path, mime_type="application/pdf")
-    if console:
-        try:
-            console.log(f"Uploaded PDF file: {pdf_path}")
-        except Exception:
-            pass
+    file = uploaded_file or (
+        genai.upload_file(pdf_path, mime_type="application/pdf") if pdf_path else None
+    )
+    if file is None:
+        raise ValueError("No uploaded_file provided and no pdf_path to upload from.")
     safe_title = section_title.replace("{", "{{").replace("}", "}}")
     safe_type = (section_type or "section").strip()
     instruction = (
@@ -305,8 +325,9 @@ def get_section_content_verbose(
 
 def get_book_metadata_verbose(
     model: genai.GenerativeModel,
-    pdf_path: str,
+    pdf_path: Optional[str] = None,
     *,
+    uploaded_file: Any | None = None,
     console=None,
     debug_path: Optional[str] = None,
     stream_console: bool = False,
@@ -317,7 +338,11 @@ def get_book_metadata_verbose(
             console.log("Requesting book metadata from Gemini…")
         except Exception:
             pass
-    file = genai.upload_file(pdf_path, mime_type="application/pdf")
+    file = uploaded_file or (
+        genai.upload_file(pdf_path, mime_type="application/pdf") if pdf_path else None
+    )
+    if file is None:
+        raise ValueError("No uploaded_file provided and no pdf_path to upload from.")
     instruction = (
         "Extract bibliographic metadata for this book and return JSON only. "
         "Fields: title (string); authors (array of strings); isbn (string, digits/dashes, null if none); "
@@ -441,6 +466,12 @@ def _parse_json_safely(text: str) -> Any:
             closing = s.rfind("```")
             if closing != -1 and closing > first_nl:
                 text = s[first_nl + 1 : closing]
+    # Pre-process to repair common streaming artifacts:
+    # 1) Merge whitespace inadvertently inserted inside numeric literals, e.g. "0.3015\n466..." -> "0.3015466..."
+    #    This is safe because JSON cannot legally contain whitespace within a number token.
+    text = re.sub(r"(?<=\d)\s+(?=\d)", "", text)
+    # 2) Remove trailing commas before closing } or ]
+    text = re.sub(r",\s*([}\]])", r"\1", text)
     # Try direct parse
     try:
         return json.loads(text)
@@ -459,6 +490,9 @@ def _parse_json_safely(text: str) -> Any:
                         end_index = i
             if end_index != -1:
                 snippet = text[start : end_index + 1]
+                # Apply the same pre-processing to the snippet
+                snippet = re.sub(r"(?<=\d)\s+(?=\d)", "", snippet)
+                snippet = re.sub(r",\s*([}\]])", r"\1", snippet)
                 return json.loads(snippet)
         raise
 

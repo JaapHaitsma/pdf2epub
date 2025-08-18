@@ -9,6 +9,7 @@ from .gemini_client import (
     get_section_content_verbose,
     get_sections_from_pdf_verbose,
     init_client,
+    upload_pdf_once,
 )
 from .packager import write_manifest_to_dir, zip_epub_from_dir
 
@@ -35,8 +36,6 @@ def convert_pdf_to_epub(
     console.log(f"Reading PDF: {input_pdf}")
     client = None if from_debug else init_client(api_key=api_key, model=model)
 
-    # Only section-by-section mode is supported
-    console.log("Using section-by-section mode…")
     manifest = _build_manifest_by_section(
         client,
         input_pdf,
@@ -81,6 +80,16 @@ def _build_manifest_by_section(
     stem = output_epub.stem
     # 1) Get sections
     sections_debug = output_epub.parent / f"{stem}_sections_raw.json"
+    # Upload the PDF once so we can reuse the uploaded handle for all Gemini requests
+    uploaded = None
+    if not from_debug and client is not None:
+        try:
+            uploaded = upload_pdf_once(str(input_pdf), console=console)
+        except Exception as e:
+            try:
+                console.log(f"Single upload failed, will fall back to per-call upload: {e}")
+            except Exception:
+                pass
     if from_debug and sections_debug.exists():
         try:
             import json
@@ -91,7 +100,8 @@ def _build_manifest_by_section(
     else:
         sections = get_sections_from_pdf_verbose(
             client,
-            str(input_pdf),
+            None,
+            uploaded_file=uploaded,
             console=console,
             debug_path=str(sections_debug) if debug else None,
             stream_console=stream_console,
@@ -134,7 +144,8 @@ def _build_manifest_by_section(
         else:
             data = get_section_content_verbose(
                 client,
-                str(input_pdf),
+                None,
+                uploaded_file=uploaded,
                 section_index=idx,
                 section_type=sec_type,
                 section_title=title,
@@ -233,7 +244,22 @@ def _build_manifest_by_section(
         except Exception:
             meta = {}
     else:
-        meta = _extract_metadata(client, input_pdf, output_epub, console, debug)
+        # Reuse uploaded file handle for metadata to avoid a second upload
+        try:
+            dbg_path = output_epub.parent / f"{output_epub.stem}_metadata_raw.json"
+            meta = get_book_metadata_verbose(
+                client,
+                None,
+                uploaded_file=uploaded,
+                console=console,
+                debug_path=str(dbg_path) if debug else None,
+            )
+        except Exception as e:  # noqa: BLE001
+            try:
+                console.log(f"Metadata extraction failed, continuing without: {e}")
+            except Exception:
+                pass
+            meta = {}
     # For EPUB 2 (NCX present), omit nav.xhtml entirely; it's EPUB 3 only
     # We'll still build it for EPUB 3 cases below if needed
     nav = _build_nav_xhtml(book_title, entries)
@@ -656,7 +682,8 @@ def _extract_metadata(client, input_pdf: Path, output_epub: Path, console: Conso
         dbg_path = output_epub.parent / f"{output_epub.stem}_metadata_raw.json"
         return get_book_metadata_verbose(
             client,
-            str(input_pdf),
+            None,
+            uploaded_file=upload_pdf_once(str(input_pdf), console=console) if client else None,
             console=console,
             debug_path=str(dbg_path) if debug else None,
         )
