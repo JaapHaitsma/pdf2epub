@@ -27,6 +27,7 @@ def convert_pdf_to_epub(
     cover_image_path: Optional[Path] = None,
     auto_cover: bool = True,
     stream_console: bool = False,
+    from_debug: bool = False,
 ) -> None:
     console = console or Console()
 
@@ -34,7 +35,7 @@ def convert_pdf_to_epub(
         raise FileNotFoundError(input_pdf)
 
     console.log(f"Reading PDF: {input_pdf}")
-    client = init_client(api_key=api_key, model=model)
+    client = None if from_debug else init_client(api_key=api_key, model=model)
 
     # Only section-by-section mode is supported
     console.log("Using section-by-section mode…")
@@ -47,6 +48,7 @@ def convert_pdf_to_epub(
     stream_console=stream_console,
         cover_image_path=cover_image_path,
         auto_cover=auto_cover,
+        from_debug=from_debug,
     )
     temp_dir = output_epub.parent / (output_epub.stem + "_epub_src")
     if temp_dir.exists():
@@ -76,17 +78,26 @@ def _build_manifest_by_section(
     stream_console: bool = False,
     cover_image_path: Optional[Path] = None,
     auto_cover: bool = True,
+    from_debug: bool = False,
 ) -> Dict[str, Any]:
     stem = output_epub.stem
     # 1) Get sections
     sections_debug = output_epub.parent / f"{stem}_sections_raw.json"
-    sections = get_sections_from_pdf_verbose(
-        client,
-        str(input_pdf),
-        console=console,
-        debug_path=str(sections_debug) if debug else None,
-    stream_console=stream_console,
-    )
+    if from_debug and sections_debug.exists():
+        try:
+            import json
+            sections_data = json.loads(sections_debug.read_text(encoding="utf-8"))
+            sections = sections_data if isinstance(sections_data, list) else sections_data.get("sections", [])
+        except Exception:
+            sections = []
+    else:
+        sections = get_sections_from_pdf_verbose(
+            client,
+            str(input_pdf),
+            console=console,
+            debug_path=str(sections_debug) if debug else None,
+            stream_console=stream_console,
+        )
     if not sections:
         # Fallback to a single generic section
         sections = [{"index": 1, "type": "section", "title": input_pdf.stem}]
@@ -110,16 +121,29 @@ def _build_manifest_by_section(
         sec_type = str(sec.get("type", "section")).lower()
         title = str(sec.get("title", sec_type.title()))
         sec_debug = output_epub.parent / f"{stem}_sec{idx:02}_raw.json"
-        data = get_section_content_verbose(
-            client,
-            str(input_pdf),
-            section_index=idx,
-            section_type=sec_type,
-            section_title=title,
-            console=console,
-            debug_path=str(sec_debug) if debug else None,
-            stream_console=stream_console,
-        )
+        if from_debug and sec_debug.exists():
+            try:
+                import json
+                data = json.loads(sec_debug.read_text(encoding="utf-8"))
+                if not isinstance(data, dict):
+                    data = {"xhtml": str(data)}
+            except Exception as e:
+                try:
+                    console.log(f"Failed to read debug section {idx}: {e}")
+                except Exception:
+                    pass
+                data = {"xhtml": ""}
+        else:
+            data = get_section_content_verbose(
+                client,
+                str(input_pdf),
+                section_index=idx,
+                section_type=sec_type,
+                section_title=title,
+                console=console,
+                debug_path=str(sec_debug) if debug else None,
+                stream_console=stream_console,
+            )
         html_fragment: str = data.get("xhtml", "")
         # Filter decorative images before extraction and strip their references from XHTML
         imgs_raw = data.get("images") if isinstance(data, dict) else None
@@ -201,7 +225,18 @@ def _build_manifest_by_section(
                 pass
 
     book_title = input_pdf.stem
-    meta = _extract_metadata(client, input_pdf, output_epub, console, debug)
+    if from_debug:
+        try:
+            import json
+            dbg_path = output_epub.parent / f"{output_epub.stem}_metadata_raw.json"
+            if dbg_path.exists():
+                meta = json.loads(dbg_path.read_text(encoding="utf-8"))
+            else:
+                meta = {}
+        except Exception:
+            meta = {}
+    else:
+        meta = _extract_metadata(client, input_pdf, output_epub, console, debug)
     # For EPUB 2 (NCX present), omit nav.xhtml entirely; it's EPUB 3 only
     # We'll still build it for EPUB 3 cases below if needed
     nav = _build_nav_xhtml(book_title, entries)
@@ -255,6 +290,8 @@ def _build_manifest_by_section(
 
 
 def _wrap_xhtml(title: str, body_fragment: str) -> str:
+    frag = _sanitize_fragment_for_epub2(body_fragment)
+    frag = _convert_ol_to_ul(frag)
     return (
         "<?xml version='1.0' encoding='utf-8'?>\n"
     "<html xmlns='http://www.w3.org/1999/xhtml' xml:lang='en'>\n"
@@ -264,7 +301,7 @@ def _wrap_xhtml(title: str, body_fragment: str) -> str:
         "    <link rel='stylesheet' type='text/css' href='styles.css'/>\n"
         "  </head>\n"
         "  <body>\n"
-    f"{_sanitize_fragment_for_epub2(body_fragment)}\n"
+        f"{frag}\n"
         "  </body>\n"
         "</html>\n"
     )
@@ -449,6 +486,20 @@ def _sanitize_fragment_for_epub2(fragment: str) -> str:
         out = re.sub(r"<\s*/\s*figure\s*>", "</div>", out, flags=re.IGNORECASE)
         out = re.sub(r"<\s*figcaption(\s+[^>]*)?>", "<p class='figcaption'>", out, flags=re.IGNORECASE)
         out = re.sub(r"<\s*/\s*figcaption\s*>", "</p>", out, flags=re.IGNORECASE)
+        return out
+    except Exception:
+        return fragment
+
+def _convert_ol_to_ul(fragment: str) -> str:
+    """Convert ordered lists to unordered lists, dropping type/start attributes.
+
+    We keep list items <li> as-is; any numbering should be included inside the text by the generator.
+    """
+    if not fragment:
+        return fragment
+    try:
+        out = re.sub(r"<\s*ol(\s+[^>]*)?>", "<ul>", fragment, flags=re.IGNORECASE)
+        out = re.sub(r"<\s*/\s*ol\s*>", "</ul>", out, flags=re.IGNORECASE)
         return out
     except Exception:
         return fragment

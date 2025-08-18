@@ -7,11 +7,11 @@ import google.generativeai as genai
 
 SYSTEM_PROMPT = (
     "You are a helpful editor. Clean and structure book-like text into chapters and sections. "
-    "Preserve lists, code blocks, and headings. Output MUST be valid HTML5 fragment(s), "
-    "using <h1> for title, <h2>/<h3> for sections, <p> for paragraphs, <ul>/<ol>/<li> for lists, "
+    "Preserve lists, code blocks, and headings. Output MUST be valid XHTML fragment(s), such that it is compatible with EPUB format "
+        "using <h1> for title, <h2>/<h3> for sections, <p> for paragraphs, and <ul><li> for lists (never use <ol>; include any original numbering like '1.' '(a)' inside the <li> text), "
     "and <pre><code> for code. Always preserve numbering prefixes and labels as they appear in the document "
     "(e.g., 'Chapter 3', '1.2.4', '§ 2.3'). When a prompt explicitly requests images, include them as instructed; "
-    "otherwise do not add images."
+    "otherwise do not add images. Use straight ASCII quotes (\" and ') in text; do NOT use typographic quotes or HTML entities for quotes (no &ldquo;, &rdquo;, &lsquo;, &rsquo;). Escape reserved characters correctly: in text nodes write & as &amp;, < as &lt;, and > as &gt;; for attribute values use double quotes and escape embedded quotes as &quot;. Never output a raw & character."
 )
 
 
@@ -26,7 +26,7 @@ def generate_structured_html(model: genai.GenerativeModel, chunks: Iterable[str]
         prompt = (
             "Convert the following PDF-extracted text into clean, structured HTML suitable for EPUB.\n\n"
             f"TEXT:\n{chunk}\n\n"
-            "Rules: produce only HTML, no markdown, no frontmatter, no explanations."
+            "Rules: produce only HTML, no markdown, no frontmatter, no explanations. Use <ul><li> for lists; do NOT use <ol>. Preserve the original numbering/prefix characters by writing them inside each <li> (e.g., '1. First', '(a) Item'). Use straight ASCII quotes (\" and ') in text, avoid &ldquo; &rdquo; &lsquo; &rsquo;. Properly escape reserved characters: & -> &amp;, < -> &lt;, > -> &gt; in text; in attributes use double quotes and escape embedded quotes as &quot;. Never leave a raw & in output."
         )
         resp = model.generate_content(prompt)
         html = resp.text or ""
@@ -168,12 +168,13 @@ def get_section_content_verbose(
     instruction = (
         "Extract the specified book section from the PDF and return JSON only. "
         "JSON shape: {\"xhtml\": string, \"images\": [ {\"filename\": string, \"label\": string, \"box_2d\": [x0,y0,x1,y1], \"page_index\": integer (1-based) } ] }.\n"
-        "Rules: xhtml should be a clean HTML5 fragment. Where images belong, include <figure><img src=\"images/{filename}\" alt=\"{label}\"/></figure> with the provided filename.\n"
+    "Rules: xhtml should be a clean HTML5 fragment. Use <ul><li> for lists; do NOT use <ol>. Preserve original numbering/prefix characters by including them inside the <li> text. Where images belong, include <figure><img src=\"images/{filename}\" alt=\"{label}\"/></figure> with the provided filename.\n"
         "Only include semantically meaningful figures (photos, diagrams, charts, illustrations).\n"
         "Explicitly DO NOT include decorative elements like borders, underlines, highlights, separators, simple rectangles/boxes around text, or page ornaments.\n"
         "Preserve the original numbering and labels in headings exactly as they appear (e.g., 'Chapter 3', '1.2.4 Methods'). Do not renumber based on the provided index.\n"
         "box_2d coordinates MUST be normalized floats in [0,1] relative to the page (top-left origin).\n"
-        f"Return only JSON. Section to extract: index={section_index}, type=\"{safe_type}\", title=\"{safe_title}\"."
+    f"Use straight ASCII quotes (\" and ') in text content; do NOT use &ldquo; &rdquo; &lsquo; &rsquo; or other typographic quote entities. Properly escape reserved characters: & -> &amp;, < -> &lt;, > -> &gt; in text; escape embedded quotes in attribute values as &quot;. Never output raw &. "
+    f"Return only JSON. Section to extract: index={section_index}, type=\"{safe_type}\", title=\"{safe_title}\"."
     )
     text = ""
     try:
@@ -323,7 +324,7 @@ def get_book_metadata_verbose(
         "Extract bibliographic metadata for this book and return JSON only. "
         "Fields: title (string); authors (array of strings); isbn (string, digits/dashes, null if none); "
         "language (ISO 639-1 like 'en' if known); publisher (string); date (YYYY or YYYY-MM or YYYY-MM-DD); "
-        "description (string summary); subjects (array of strings)."
+    "description (string summary); subjects (array of strings). Use straight ASCII quotes (\" and ') in text fields; avoid &ldquo; &rdquo; &lsquo; &rsquo;."
     )
     text = ""
     try:
