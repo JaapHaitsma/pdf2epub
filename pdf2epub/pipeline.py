@@ -1,5 +1,6 @@
 import re
 from pathlib import Path
+import xml.etree.ElementTree as ET
 from typing import Any, Dict, List, Optional
 
 from rich.console import Console
@@ -313,14 +314,15 @@ def _build_manifest_by_section(
 
 
 def _wrap_xhtml(title: str, body_fragment: str) -> str:
-    frag = _sanitize_fragment_for_epub2(body_fragment)
+    frag = _repair_xhtml_fragment(body_fragment)
+    frag = _sanitize_fragment_for_epub2(frag)
     frag = _convert_ol_to_ul(frag)
-    return (
+    doc = (
         "<?xml version='1.0' encoding='utf-8'?>\n"
-    "<html xmlns='http://www.w3.org/1999/xhtml' xml:lang='en'>\n"
+        "<html xmlns='http://www.w3.org/1999/xhtml' xml:lang='en'>\n"
         "  <head>\n"
         f"    <title>{_escape_xml(title)}</title>\n"
-    "    <meta http-equiv='Content-Type' content='application/xhtml+xml; charset=utf-8'/>\n"
+        "    <meta http-equiv='Content-Type' content='application/xhtml+xml; charset=utf-8'/>\n"
         "    <link rel='stylesheet' type='text/css' href='styles.css'/>\n"
         "  </head>\n"
         "  <body>\n"
@@ -328,6 +330,27 @@ def _wrap_xhtml(title: str, body_fragment: str) -> str:
         "  </body>\n"
         "</html>\n"
     )
+    # Validate well-formedness; if invalid, attempt one more repair pass then raise if still bad
+    try:
+        ET.fromstring(doc)
+    except ET.ParseError:
+        fixed = _repair_xhtml_fragment(frag)
+        doc2 = (
+            "<?xml version='1.0' encoding='utf-8'?>\n"
+            "<html xmlns='http://www.w3.org/1999/xhtml' xml:lang='en'>\n"
+            "  <head>\n"
+            f"    <title>{_escape_xml(title)}</title>\n"
+            "    <meta http-equiv='Content-Type' content='application/xhtml+xml; charset=utf-8'/>\n"
+            "    <link rel='stylesheet' type='text/css' href='styles.css'/>\n"
+            "  </head>\n"
+            "  <body>\n"
+            f"{fixed}\n"
+            "  </body>\n"
+            "</html>\n"
+        )
+        ET.fromstring(doc2)  # will raise if still invalid
+        return doc2
+    return doc
 
 
 def _build_nav_xhtml(book_title: str, entries: List[Dict[str, str]]) -> str:
@@ -510,6 +533,26 @@ def _sanitize_fragment_for_epub2(fragment: str) -> str:
         out = re.sub(r"<\s*figcaption(\s+[^>]*)?>", "<p class='figcaption'>", out, flags=re.IGNORECASE)
         out = re.sub(r"<\s*/\s*figcaption\s*>", "</p>", out, flags=re.IGNORECASE)
         return out
+    except Exception:
+        return fragment
+
+def _repair_xhtml_fragment(fragment: str) -> str:
+    """Repair common malformed HTML/XHTML sequences from LLM output.
+
+    - Fix concatenated tags like </p<p> -> </p><p>
+    - Normalize empty elements: <br> -> <br />
+    - Escape stray ampersands not part of an entity
+    """
+    if not fragment:
+        return fragment
+    try:
+        s = fragment
+        s = s.replace("</p<p>", "</p><p>")
+        s = s.replace("<br>", "<br />")
+        # Escape stray '&' not followed by an entity pattern
+        import re as _re
+        s = _re.sub(r"&(?!#?\w+;)", "&amp;", s)
+        return s
     except Exception:
         return fragment
 

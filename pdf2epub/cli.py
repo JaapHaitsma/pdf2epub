@@ -1,4 +1,5 @@
 import os
+import time
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -106,6 +107,7 @@ def main(argv: list[str] | None = None) -> int:
 
     model = os.getenv("GEMINI_MODEL") or "gemini-2.5-pro"
 
+    start_ts = time.perf_counter()
     try:
         convert_pdf_to_epub(
             input_pdf=args.input_pdf,
@@ -126,8 +128,9 @@ def main(argv: list[str] | None = None) -> int:
     except Exception as e:  # noqa: BLE001
         console.print(f"[red]Failed:[/] {e}")
         return 1
-
-    console.print(f"[green]Done:[/] Wrote {args.output_epub}")
+    elapsed = time.perf_counter() - start_ts
+    mins, secs = divmod(int(elapsed), 60)
+    console.print(f"[green]Done:[/] Wrote {args.output_epub}  (time: {mins:02d}:{secs:02d})")
     return 0
 
 
