@@ -549,8 +549,24 @@ def _repair_xhtml_fragment(fragment: str) -> str:
         s = fragment
         s = s.replace("</p<p>", "</p><p>")
         s = s.replace("<br>", "<br />")
-        # Escape stray '&' not followed by an entity pattern
+        # Convert HTML named entities (like &copy;) to XML-safe numeric entities.
+        # Keep the five XML predefined entities as-is.
         import re as _re
+        from html.entities import name2codepoint as _n2cp
+
+        def _ent_repl(m: _re.Match[str]) -> str:
+            name = m.group(1)
+            if name in ("amp", "lt", "gt", "quot", "apos"):
+                return f"&{name};"
+            cp = _n2cp.get(name)
+            if cp is not None:
+                return f"&#{cp};"
+            # Unknown entity: make it literal text by amp-escaping the '&'
+            return f"&amp;{name};"
+
+        s = _re.sub(r"&([a-zA-Z][a-zA-Z0-9]+);", _ent_repl, s)
+
+        # Escape stray '&' not followed by an entity (numeric or named) pattern
         s = _re.sub(r"&(?!#?\w+;)", "&amp;", s)
         return s
     except Exception:

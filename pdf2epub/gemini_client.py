@@ -13,6 +13,7 @@ SYSTEM_PROMPT = (
     "When a prompt explicitly requests images, include them as instructed; otherwise do not add images. "
     "Well-formedness rules: close all tags; never concatenate an end tag and the next start tag without a closing angle bracket (use </p><p>, never </p<p>); "
     "use self-closing empty elements where appropriate (e.g., <br />). Use straight ASCII quotes (\" and ') in text; do NOT use typographic quotes or HTML entities for quotes (no &ldquo;, &rdquo;, &lsquo;, &rsquo;). "
+    "Do NOT use HTML named entities like &copy;, &nbsp;, &mdash;. Prefer literal Unicode symbols (e.g., ©, —) or numeric character references (e.g., &#169;). The only named entities permitted are the five XML predefined ones: &amp;, &lt;, &gt;, &quot;, &apos;. "
     "Escape reserved characters correctly: in text nodes write & as &amp;, < as &lt;, and > as &gt;; for attribute values use double quotes and escape embedded quotes as &quot;. Never output a raw & character. "
     "When embedding XHTML in a JSON string value, you MUST output strict RFC 8259 JSON: escape embedded double quotes as \\\" and backslashes as \\\\, represent newlines as \\n, do not emit control characters, comments, code fences, or trailing commas. Return a single top-level JSON object only."
 )
@@ -72,7 +73,7 @@ def generate_structured_html(model: genai.GenerativeModel, chunks: Iterable[str]
         prompt = (
             "Convert the following PDF-extracted text into clean, structured HTML suitable for EPUB.\n\n"
             f"TEXT:\n{chunk}\n\n"
-            "Rules: produce only HTML, no markdown, no frontmatter, no explanations. Use <ul><li> for lists; do NOT use <ol>. Preserve the original numbering/prefix characters by writing them inside each <li> (e.g., '1. First', '(a) Item'). Use straight ASCII quotes (\" and ') in text, avoid &ldquo; &rdquo; &lsquo; &rsquo;. Properly escape reserved characters: & -> &amp;, < -> &lt;, > -> &gt; in text; in attributes use double quotes and escape embedded quotes as &quot;. Never leave a raw & in output."
+            "Rules: produce only HTML, no markdown, no frontmatter, no explanations. Use <ul><li> for lists; do NOT use <ol>. Preserve the original numbering/prefix characters by writing them inside each <li> (e.g., '1. First', '(a) Item'). Use straight ASCII quotes (\" and ') in text, avoid &ldquo; &rdquo; &lsquo; &rsquo;. Do NOT use HTML named entities like &copy;, &nbsp;, &mdash;; prefer Unicode symbols (©, —) or numeric entities (e.g., &#169;). Only &amp;, &lt;, &gt;, &quot;, &apos; are allowed as named entities. Properly escape reserved characters: & -> &amp;, < -> &lt;, > -> &gt; in text; in attributes use double quotes and escape embedded quotes as &quot;. Never leave a raw & in output."
         )
         resp = model.generate_content(prompt)
         html = resp.text or ""
@@ -226,6 +227,7 @@ def get_section_content_verbose(
         "Explicitly DO NOT include decorative elements like borders, underlines, highlights, separators, simple rectangles/boxes around text, or page ornaments.\n"
         "Preserve the original numbering and labels in headings exactly as they appear (e.g., 'Chapter 3', '1.2.4 Methods'). Do not renumber based on the provided index.\n"
         "box_2d coordinates MUST be normalized floats in [0,1] relative to the page (top-left origin).\n"
+        "Do NOT use HTML named entities like &copy;, &nbsp;, &mdash;; prefer literal Unicode symbols (©, —) or numeric character references (e.g., &#169;). The only allowed named entities are &amp;, &lt;, &gt;, &quot;, &apos;.\n"
         "CRITICAL: The xhtml field is a JSON string value. You MUST JSON-escape it correctly: escape embedded double quotes as \\\" and backslashes as \\\\, encode newlines as \\n, and do not emit raw control characters. "
         "Return strict RFC 8259 JSON only (no trailing commas, comments, code fences, or backticks). "
         f"Return only JSON. Section to extract: index={section_index}, type=\"{safe_type}\", title=\"{safe_title}\"."
