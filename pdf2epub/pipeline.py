@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from pathlib import Path
 import re
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from rich.console import Console
@@ -45,7 +45,7 @@ def convert_pdf_to_epub(
         output_epub,
         console,
         debug,
-    stream_console=stream_console,
+        stream_console=stream_console,
         cover_image_path=cover_image_path,
         auto_cover=auto_cover,
         from_debug=from_debug,
@@ -169,7 +169,6 @@ def _build_manifest_by_section(
                 # - extremely thin bands (likely lines/highlights)
                 # - very large thin frames (page borders)
                 # - near-full-width thin strips (separators)
-                is_thin = (w < 0.02) or (h < 0.02)
                 very_thin = (w < 0.01) or (h < 0.01)
                 near_full_w = w > 0.95
                 near_full_h = h > 0.95
@@ -778,7 +777,6 @@ def _extract_and_register_images(
         filename = _sanitize_filename(str(it.get("filename", "")))
         page_index = it.get("page_index")
         box = it.get("box_2d")
-        label = str(it.get("label", ""))
         if not isinstance(page_index, int) or not isinstance(box, list) or len(box) != 4:
             continue
         pidx = page_index - 1
