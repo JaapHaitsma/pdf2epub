@@ -1,7 +1,7 @@
 # pdf2epub
 
 Convert a PDF to an EPUB using Google Gemini (2.5 Pro) with a simple, resilient CLI.
-This project has been vibe coded with Github copilot with GPT-5 (previe)
+This project has been vibe coded with Github copilot with GPT-5 (preview)
 
 ## Highlights
 
